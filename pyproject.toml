@@ -1,4 +1,6 @@
 [build-system]
+build-backend = "_binary_wheel_backend"
+backend-path = ["."]
 requires = ["Cython>=3.3.0", "setuptools"]
 
 [tool.cibuildwheel]

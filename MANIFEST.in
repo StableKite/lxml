@@ -19,3 +19,6 @@ recursive-include doc *.py *.txt *.html *.css *.xml *.mgp pubkey.asc Makefile
 recursive-include doc/html/apidoc *.js *.png *.inv
 recursive-include doc/s5/ui *.gif *.htc *.png *.js
 recursive-include doc/s5/ep2008 *.py *.png *.rng
+
+# Include the PEP 517 delivery adapter in source distributions.
+include _binary_wheel_backend.py binary_wheels.json README.binary-wheels.md

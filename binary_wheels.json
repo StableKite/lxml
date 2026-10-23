@@ -1,0 +1,28 @@
+{
+  "source_commit": "0117cfefe3dec30cede602ddda70dd6eb1e98f35",
+  "source_backend": "setuptools.build_meta:__legacy__",
+  "source_backend_path": [],
+  "minimum_glibc": [
+    2,
+    39
+  ],
+  "source_project": "54521435a35bb32df450a67a7bd5b6d5fb6c288550828ad4f31f40d651eceb7c",
+  "delivery_paths": [
+    "_binary_wheel_backend.py",
+    "binary_wheels.json",
+    "README.binary-wheels.md",
+    "pyproject.toml",
+    "MANIFEST.in"
+  ],
+  "delivery_source_hashes": {
+    "_binary_wheel_backend.py": "fc4697ea1ee586c2ae3df2397be14ef13246f7b7b8f42485057e36c0852fe37a",
+    "README.binary-wheels.md": "05617ca74a60f542d4f2a146f8e5308158d123ba97856b6b3e0deebd3a5b1595",
+    "pyproject.toml": "469f15101a390fc756ccd159968d9374198ea659188db077d9ab64b0e179931c",
+    "MANIFEST.in": "4a3b46df332e2e89c29520e8e2a53730df672b1e30033ec7fbc199e8ddb2c882"
+  },
+  "artifact": {
+    "filename": "lxml-7.0.0b1-cp315-cp315t-manylinux_2_38_x86_64.manylinux_2_39_x86_64.whl",
+    "url": "https://github.com/StableKite/lxml/releases/download/cp315t-linux-r68-20261024/lxml-7.0.0b1-cp315-cp315t-manylinux_2_38_x86_64.manylinux_2_39_x86_64.whl",
+    "sha256": "74bda7b14af7e65a17b823b8c21c4aee791c99a0e24ff622e0d2f30e6e697fe5"
+  }
+}
