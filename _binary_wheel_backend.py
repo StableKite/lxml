@@ -8,16 +8,17 @@ import platform
 import subprocess
 import sys
 import sysconfig
+from typing import Any, Dict, List, Optional, cast
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST = ROOT / 'binary_wheels.json'
 
 
-def _manifest():
-    return json.loads(MANIFEST.read_text(encoding='utf8'))
+def _manifest() -> Dict[str, Any]:
+    return cast(Dict[str, Any], json.loads(MANIFEST.read_text(encoding='utf8')))
 
 
-def _normalized_project(path):
+def _normalized_project(path: Path) -> str:
     import tomllib
     data = tomllib.loads(path.read_text(encoding='utf8'))
     build = data.get('build-system', {})
@@ -26,22 +27,31 @@ def _normalized_project(path):
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 
-def _asset(config_settings=None):
+def _asset(config_settings: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, str]]:
     if (config_settings or sys.version_info[:2] != (3, 15)
             or not sysconfig.get_config_var('Py_GIL_DISABLED')
-            or sys.platform != 'linux' or platform.machine() != 'x86_64'):
+            or sysconfig.get_config_var('Py_DEBUG')):
         return None
     if any(os.environ.get(name) for name in
-           ('CFLAGS', 'CXXFLAGS', 'CPPFLAGS', 'LDFLAGS', 'CC', 'CXX')):
+           ('CFLAGS', 'CXXFLAGS', 'CPPFLAGS', 'LDFLAGS', 'CC', 'CXX', 'STATIC_DEPS', 'STATICBUILD',
+            'LIBXML2_VERSION', 'LIBXSLT_VERSION', 'LIBICONV_VERSION', 'ZLIB_VERSION',
+            'DOWNLOAD_DIR', 'LXML_STATIC_INCLUDE_DIRS', 'LXML_STATIC_LIBRARY_DIRS')):
+        return None
+    if sysconfig.get_platform() == 'win-amd64':
+        target = 'win_amd64'
+    elif sys.platform == 'linux' and platform.machine() == 'x86_64':
+        target = 'linux_x86_64'
+    else:
         return None
     data = _manifest()
-    libc, version = platform.libc_ver()
-    if (libc != 'glibc'
-            or tuple(map(int, version.split('.'))) < tuple(data['minimum_glibc'])):
-        return None
+    if target == 'linux_x86_64':
+        libc, version = platform.libc_ver()
+        if (libc != 'glibc'
+                or tuple(map(int, version.split('.'))) < tuple(data['minimum_glibc'])):
+            return None
     for name, digest in data['delivery_source_hashes'].items():
         path = ROOT / name
-        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+        if not path.is_file() or hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest() != digest:
             return None
     if _normalized_project(ROOT / 'pyproject.toml') != data['source_project']:
         return None
@@ -61,10 +71,10 @@ def _asset(config_settings=None):
             return None
     except (OSError, subprocess.SubprocessError):
         return None
-    return data['artifact']
+    return data['artifacts'].get(target)
 
 
-def _source():
+def _source() -> Any:
     data = _manifest()
     if data.get('initialize_source_submodules'):
         subprocess.check_call(
@@ -76,13 +86,13 @@ def _source():
     return getattr(backend, attribute) if separator else backend
 
 
-def get_requires_for_build_wheel(config_settings=None):
+def get_requires_for_build_wheel(config_settings: Optional[Dict[str, Any]] = None) -> List[str]:
     if _asset(config_settings):
         return ['pip']
     return _source().get_requires_for_build_wheel(config_settings)
 
 
-def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
+def build_wheel(wheel_directory: str, config_settings: Optional[Dict[str, Any]] = None, metadata_directory: Optional[str] = None) -> str:
     asset = _asset(config_settings)
     if asset is None:
         return _source().build_wheel(wheel_directory, config_settings, metadata_directory)
@@ -94,7 +104,7 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
     return asset['filename']
 
 
-def __getattr__(name):
+def __getattr__(name: str) -> Any:
     # Let pip obtain metadata from its retained wheel, avoiding a second download.
     if name == 'prepare_metadata_for_build_wheel' and _asset() is not None:
         raise AttributeError(name)
