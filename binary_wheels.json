@@ -21,7 +21,8 @@
     ".github/scripts/cp315t_native_contract.py",
     ".github/scripts/original_suite.py",
     ".github/workflows/cp315t-delivery.yml",
-    "pyrightconfig.delivery.json"
+    "pyrightconfig.delivery.json",
+    ".github/workflows/wheels.yml"
   ],
   "delivery_source_hashes": {
     "_binary_wheel_backend.py": "58b8f1d63d17eb00172cee103346e5386a38f07a579d01fcdd431637553e5821",
@@ -34,12 +35,13 @@
     ".github/scripts/cp315t_native_contract.py": "194a0d36e382eee6488ef6ff3c6dd4c3fee608d9197acd67ccb62befb9cff110",
     ".github/scripts/original_suite.py": "bb7a32dc4a3f0065944be8ff935232bbff10d4e8a7ed9ec21458e9e6523bf762",
     ".github/workflows/cp315t-delivery.yml": "b47a99b6a5fa9603d4f338b93555b009442ef1648c5db980ed9ebff6e42c3165",
-    "pyrightconfig.delivery.json": "6e447ae4ac3654ec81424dcf244b09744afc552f12d2ecb0190f1359a0ccc8d9"
+    "pyrightconfig.delivery.json": "6e447ae4ac3654ec81424dcf244b09744afc552f12d2ecb0190f1359a0ccc8d9",
+    ".github/workflows/wheels.yml": "20b9b20f6c537f8072985bf1c9dd18fe4bbd2463b0ed9ad811d8af41b838cb4f"
   },
   "artifacts": {
     "win_amd64": {
       "filename": "lxml-7.0.0b1-cp315-cp315t-win_amd64.whl",
-      "url": "https://github.com/StableKite/lxml/releases/download/cp315t-engineering-20261031/lxml-7.0.0b1-cp315-cp315t-win_amd64.whl",
+      "url": "https://github.com/StableKite/lxml/releases/download/cp315t-verified-dependencies-20261109-1/lxml-7.0.0b1-cp315-cp315t-win_amd64.whl",
       "sha256": "b9fcdf3feca7c0457dc6d2ef9c77fa6faa5bf0bcf45ce2636afa171cbed2fbd2"
     },
     "linux_x86_64": {
