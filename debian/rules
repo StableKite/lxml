@@ -29,6 +29,7 @@ build3-stamp: $(PY3VERS:%=build3-python%) doc-build3-python$(PY3VER)
 	touch $@
 build3-python%: prebuild
 	python$* setup.py build
+	python$* debian/run-upstream-tests.py
 	touch $@
 doc-build3-python$(PY3VER): build3-python$(PY3VER)
 ifeq (,$(filter nodoc,$(DEB_BUILD_OPTIONS)))
