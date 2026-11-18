@@ -15,14 +15,19 @@ import lxml
 import lxml.html
 from lxml import etree, objectify
 
+lxml.__path__.append(str(root / 'src/lxml'))
+lxml.html.__path__.append(str(root / 'src/lxml/html'))
+from lxml import tests
+
+tests.__path__.insert(0, str(build / 'lxml/tests'))
+from lxml.tests import _testlock
+
 if sysconfig.get_config_var('Py_GIL_DISABLED'):
     if sys.flags.gil is not None or sys._is_gil_enabled():
         raise SystemExit('lxml imports must preserve the default free-threaded runtime')
 
-for module in (etree, objectify):
+for module in (etree, objectify, _testlock):
     if not Path(module.__file__).resolve().is_relative_to(build):
         raise SystemExit('refusing to test an installed or foreign extension')
-lxml.__path__.append(str(root / 'src/lxml'))
-lxml.html.__path__.append(str(root / 'src/lxml/html'))
 sys.argv = [str(root / 'test.py'), '--no-src', '--all-levels', '-u', '-f', '-v']
 runpy.run_path(str(root / 'test.py'), run_name='__main__')
