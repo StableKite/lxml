@@ -51,7 +51,6 @@ PARSE_HTML = doctest.register_optionflag('PARSE_HTML')
 PARSE_XML = doctest.register_optionflag('PARSE_XML')
 NOPARSE_MARKUP = doctest.register_optionflag('NOPARSE_MARKUP')
 
-OutputChecker = doctest.OutputChecker
 
 def strip(v):
     if v is None:
@@ -71,14 +70,19 @@ def html_fromstring(html):
 _repr_re = re.compile(r'^<[^>]+ (at|object) ')
 _norm_whitespace_re = re.compile(r'[ \t\n][ \t\n]+')
 
-class LXMLOutputChecker(OutputChecker):
+class LXMLOutputChecker(doctest.OutputChecker):
 
     empty_tags = (
         'param', 'img', 'area', 'br', 'basefont', 'input',
         'base', 'meta', 'link', 'col')
 
+    # We mess with frames, classes, methods and globals in ".check_output",
+    # so make sure we always keep safe reference to globals we need.
+    _etree = etree
+    _OutputChecker = doctest.OutputChecker
+
     def get_default_parser(self):
-        return etree.XML
+        return self._etree.XML
 
     def check_output(self, want, got, optionflags):
         alt_self = getattr(self, '_temp_override_self', None)
@@ -86,18 +90,18 @@ class LXMLOutputChecker(OutputChecker):
             super_method = self._temp_call_super_check_output
             self = alt_self
         else:
-            super_method = OutputChecker.check_output
+            super_method = self._OutputChecker.check_output
         parser = self.get_parser(want, got, optionflags)
         if not parser:
             return super_method(
                 self, want, got, optionflags)
         try:
             want_doc = parser(want)
-        except etree.XMLSyntaxError:
+        except self._etree.XMLSyntaxError:
             return False
         try:
             got_doc = parser(got)
-        except etree.XMLSyntaxError:
+        except self._etree.XMLSyntaxError:
             return False
         return self.compare_docs(want_doc, got_doc)
 
@@ -108,7 +112,7 @@ class LXMLOutputChecker(OutputChecker):
         if PARSE_HTML & optionflags:
             parser = html_fromstring
         elif PARSE_XML & optionflags:
-            parser = etree.XML
+            parser = self._etree.XML
         elif (want.strip().lower().startswith('<html')
               and got.strip().startswith('<html')):
             parser = html_fromstring
@@ -185,16 +189,16 @@ class LXMLOutputChecker(OutputChecker):
         if parser is not None:
             try:
                 want_doc = parser(want)
-            except etree.XMLSyntaxError:
+            except self._etree.XMLSyntaxError:
                 e = sys.exc_info()[1]
                 errors.append('In example: %s' % e)
             try:
                 got_doc = parser(got)
-            except etree.XMLSyntaxError:
+            except self._etree.XMLSyntaxError:
                 e = sys.exc_info()[1]
                 errors.append('In actual output: %s' % e)
         if parser is None or errors:
-            value = OutputChecker.output_difference(
+            value = self._OutputChecker.output_difference(
                 self, example, got, optionflags)
             if errors:
                 errors.append(value)
@@ -264,7 +268,7 @@ class LXMLOutputChecker(OutputChecker):
 
     def format_tag(self, el):
         attrs = []
-        if isinstance(el, etree.CommentBase):
+        if isinstance(el, self._etree.CommentBase):
             # FIXME: probably PIs should be handled specially too?
             return '<!--'
         for name, value in sorted(el.attrib.items()):
@@ -272,9 +276,9 @@ class LXMLOutputChecker(OutputChecker):
         if not attrs:
             return '<%s>' % el.tag
         return '<%s %s>' % (el.tag, ' '.join(attrs))
-    
+
     def format_end_tag(self, el):
-        if isinstance(el, etree.CommentBase):
+        if isinstance(el, self._etree.CommentBase):
             # FIXME: probably PIs should be handled specially too?
             return '-->'
         return '</%s>' % el.tag
@@ -362,7 +366,7 @@ class LXMLOutputChecker(OutputChecker):
 class LHTMLOutputChecker(LXMLOutputChecker):
     def get_default_parser(self):
         return html_fromstring
-    
+
 def install(html=False):
     """
     Install doctestcompare for all future doctests.
@@ -392,6 +396,7 @@ def temp_install(html=False, del_module=None):
     checker = Checker()
     old_checker = dt_self._checker
     dt_self._checker = checker
+
     # The unfortunate thing is that there is a local variable 'check'
     # in the function that runs the doctests, that is a bound method
     # into the output checker.  We have to update that.  We can't
@@ -403,9 +408,7 @@ def temp_install(html=False, del_module=None):
     # implementation.
     check_func = frame.f_locals['check'].__func__
     checker_check_func = checker.check_output.__func__
-    # Because we can't patch up func_globals, this is the only global
-    # in check_output that we care about:
-    doctest.etree = etree
+
     _RestoreChecker(dt_self, old_checker, checker,
                     check_func, checker_check_func,
                     del_module)
@@ -455,7 +458,8 @@ class _RestoreChecker:
             return self.check_func(*args, **kw)
         finally:
             self.install_clone()
-            
+
+
 def _find_doctest_frame():
     import sys
     frame = sys._getframe(1)
@@ -467,7 +471,7 @@ def _find_doctest_frame():
         frame = frame.f_back
     raise LookupError(
         "Could not find doctest (only use this function *inside* a doctest)")
-    
+
 __test__ = {
     'basic': '''
     >>> temp_install()
@@ -481,8 +485,7 @@ __test__ = {
     <xml>...foo /></xml>
     '''}
 
+
 if __name__ == '__main__':
     import doctest
     doctest.testmod()
-    
-    

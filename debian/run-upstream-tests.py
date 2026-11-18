@@ -15,6 +15,10 @@ import lxml
 import lxml.html
 from lxml import etree, objectify
 
+if sysconfig.get_config_var('Py_GIL_DISABLED'):
+    if sys.flags.gil is not None or sys._is_gil_enabled():
+        raise SystemExit('lxml imports must preserve the default free-threaded runtime')
+
 for module in (etree, objectify):
     if not Path(module.__file__).resolve().is_relative_to(build):
         raise SystemExit('refusing to test an installed or foreign extension')

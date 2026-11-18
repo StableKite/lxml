@@ -39,9 +39,61 @@ class XMLSyntaxError(ParseError):
     """Syntax error while parsing an XML document.
     """
 
-cdef class ParserError(LxmlError):
+class ParserError(LxmlError):
     """Internal lxml parser error.
     """
+
+
+@cython.final
+@cython.internal
+cdef class _ParserDictionary:
+    # The string dictionary of a parser, shared by all of its parsed documents.
+
+    cdef tree.xmlDict* _c_dict
+
+    def __cinit__(self):
+        self._c_dict = tree.xmlDictCreate()
+        if not self._c_dict:
+            raise MemoryError()
+
+    def __dealloc__(self):
+        tree.xmlDictFree(self._c_dict)
+        self._c_dict = NULL
+
+    cdef void disableSizeLimit(self) noexcept:
+        tree.xmlDictSetLimit(self._c_dict, 0)
+
+    cdef tree.xmlDict *getDict(self) noexcept:
+        return self._c_dict
+
+    cdef tree.xmlDict *getDictRef(self) noexcept:
+        c_dict = self._c_dict
+        tree.xmlDictReference(c_dict)
+        return c_dict
+
+    cdef size_t getDictSize(self) noexcept:
+        return tree.xmlDictSize(self._c_dict)
+
+    cdef void initDictRef(self, tree.xmlDict** c_dict_ref) noexcept:
+        c_dict = c_dict_ref[0]
+        if c_dict is self._c_dict:
+            return
+
+        c_dict_ref[0] = self.getDictRef()
+        if c_dict is not NULL:
+            tree.xmlDictFree(c_dict)
+
+    cdef void initParserDict(self, xmlparser.xmlParserCtxt* pctxt) noexcept:
+        "Assure we always use the same string dictionary."
+        self.initDictRef(&pctxt.dict)
+        pctxt.dictNames = 1
+
+    #cdef void initXPathParserDict(self, xpath.xmlXPathContext* pctxt) noexcept:
+    #    "Assure we always use the same string dictionary."
+    #    self.initDictRef(&pctxt.dict)
+
+    cdef void initDocDict(self, xmlDoc *c_doc) noexcept:
+        self.initDictRef(&c_doc.dict)
 
 
 @cython.final
@@ -56,16 +108,11 @@ cdef class _ParserDictionaryContext:
     # __GLOBAL_PARSER_CONTEXT as defined below the class.
     #
 
-    cdef tree.xmlDict* _c_dict
     cdef _BaseParser _default_parser
     cdef list _implied_parser_contexts
 
     def __cinit__(self):
         self._implied_parser_contexts = []
-
-    def __dealloc__(self):
-        if self._c_dict is not NULL:
-            xmlparser.xmlDictFree(self._c_dict)
 
     cdef int initMainParserContext(self) except -1:
         """Put the global context into the thread dictionary of the main
@@ -104,48 +151,6 @@ cdef class _ParserDictionaryContext:
             if context is not self:
                 context._default_parser = self._default_parser._copy()
         return context._default_parser
-
-    cdef tree.xmlDict* _getThreadDict(self, tree.xmlDict* default):
-        "Return the thread-local dict or create a new one if necessary."
-        cdef _ParserDictionaryContext context
-        context = self._findThreadParserContext()
-        if context._c_dict is NULL:
-            # thread dict not yet set up => use default or create a new one
-            if default is not NULL:
-                context._c_dict = default
-                xmlparser.xmlDictReference(default)
-                return default
-            if self._c_dict is NULL:
-                self._c_dict = xmlparser.xmlDictCreate()
-            if context is not self:
-                context._c_dict = xmlparser.xmlDictCreateSub(self._c_dict)
-        return context._c_dict
-
-    cdef int initThreadDictRef(self, tree.xmlDict** c_dict_ref) except -1:
-        c_dict = c_dict_ref[0]
-        c_thread_dict = self._getThreadDict(c_dict)
-        if c_dict is c_thread_dict:
-            return 0
-        if c_dict is not NULL:
-            xmlparser.xmlDictFree(c_dict)
-        c_dict_ref[0] = c_thread_dict
-        xmlparser.xmlDictReference(c_thread_dict)
-
-    cdef int initParserDict(self, xmlparser.xmlParserCtxt* pctxt) except -1:
-        "Assure we always use the same string dictionary."
-        self.initThreadDictRef(&pctxt.dict)
-        pctxt.dictNames = 1
-
-    cdef int initXPathParserDict(self, xpath.xmlXPathContext* pctxt) except -1:
-        "Assure we always use the same string dictionary."
-        self.initThreadDictRef(&pctxt.dict)
-
-    cdef int initDocDict(self, xmlDoc* result) except -1:
-        "Store dict of last object parsed if no shared dict yet"
-        # XXX We also free the result dict here if there already was one.
-        # This case should only occur for new documents with empty dicts,
-        # otherwise we'd free data that's in use => segfault
-        self.initThreadDictRef(&result.dict)
 
     cdef _ParserContext findImpliedContext(self):
         """Return any current implied xml parser context for the current
@@ -191,6 +196,13 @@ __GLOBAL_PARSER_CONTEXT.initMainParserContext()
 
 # name of Python Py_UNICODE encoding as known to libxml2
 cdef const_char* _PY_UNICODE_ENCODING = NULL
+
+cdef extern from *:
+    """
+    #if defined(Py_LIMITED_API)
+        #define  Py_UNICODE wchar_t
+    #endif
+    """
 
 cdef int _setupPythonUnicode() except -1:
     """Sets _PY_UNICODE_ENCODING to the internal encoding name of Python unicode
@@ -289,19 +301,19 @@ _pyucs4_encoding_name = _find_PyUCS4EncodingName()
 @cython.internal
 cdef class _FileReaderContext:
     cdef object _filelike
-    cdef object _encoding
-    cdef object _url
-    cdef object _bytes
+    cdef bytes _encoding
+    cdef bytes _url
+    cdef bytes _bytes
     cdef _ExceptionContext _exc_context
     cdef Py_ssize_t _bytes_read
-    cdef char* _c_url
+    cdef const char* _c_url
     cdef bint _close_file_after_read
 
     def __cinit__(self, filelike, exc_context not None, url, encoding=None, bint close_file=False):
         self._exc_context = exc_context
         self._filelike = filelike
         self._close_file_after_read = close_file
-        self._encoding = encoding
+        self._encoding = _utf8orNone(encoding)
         if url is not None:
             url = _encodeFilename(url)
             self._c_url = _cstr(url)
@@ -345,7 +357,17 @@ cdef class _FileReaderContext:
     cdef xmlDoc* _readDoc(self, xmlparser.xmlParserCtxt* ctxt, int options) noexcept:
         cdef xmlDoc* result
         cdef void* c_callback_context = <python.PyObject*> self
-        cdef char* c_encoding = _cstr(self._encoding) if self._encoding is not None else NULL
+        cdef const char* c_encoding
+
+        if self._encoding is not None:
+            c_encoding = _cstr(self._encoding)
+        else:
+            try:
+                self._bytes = self._readBytes(16)
+                self._bytes_read = _detectBOMEncoding(self._bytes, len(self._bytes), &c_encoding)
+            except:
+                self._exc_context._store_raised()
+                return NULL
 
         orig_options = ctxt.options
         with nogil:
@@ -370,14 +392,29 @@ cdef class _FileReaderContext:
         finally:
             return result  # swallow any exceptions
 
+    cdef bytes _readBytes(self, count):
+        data = self._filelike.read(count)
+        if isinstance(data, bytes):
+            return <bytes> data
+        elif isinstance(data, str):
+            if self._encoding is None:
+                return (<str> data).encode('utf8')
+            else:
+                return python.PyUnicode_AsEncodedString(
+                    data, _cstr(self._encoding), NULL)
+        else:
+            self._close_file()
+            raise TypeError, \
+                "reading from file-like objects must return byte strings or unicode strings"
+
     cdef int copyToBuffer(self, char* c_buffer, int c_requested) noexcept:
         cdef int c_byte_count = 0
-        cdef char* c_start
+        cdef const char* c_start
         cdef Py_ssize_t byte_count, remaining
         if self._bytes_read < 0:
             return 0
         try:
-            byte_count = python.PyBytes_GET_SIZE(self._bytes)
+            byte_count = len(self._bytes)
             remaining  = byte_count - self._bytes_read
             while c_requested > remaining:
                 c_start = _cstr(self._bytes) + self._bytes_read
@@ -386,20 +423,8 @@ cdef class _FileReaderContext:
                 c_buffer += remaining
                 c_requested -= remaining
 
-                self._bytes = self._filelike.read(c_requested)
-                if not isinstance(self._bytes, bytes):
-                    if isinstance(self._bytes, unicode):
-                        if self._encoding is None:
-                            self._bytes = (<unicode>self._bytes).encode('utf8')
-                        else:
-                            self._bytes = python.PyUnicode_AsEncodedString(
-                                self._bytes, _cstr(self._encoding), NULL)
-                    else:
-                        self._close_file()
-                        raise TypeError, \
-                            "reading from file-like objects must return byte strings or unicode strings"
-
-                remaining = python.PyBytes_GET_SIZE(self._bytes)
+                data = self._bytes = self._readBytes(c_requested)
+                remaining = len(data)
                 if remaining == 0:
                     self._bytes_read = -1
                     self._close_file()
@@ -425,112 +450,207 @@ cdef int _readFilelikeParser(void* ctxt, char* c_buffer, int c_size) noexcept wi
     return (<_FileReaderContext>ctxt).copyToBuffer(c_buffer, c_size)
 
 
+@cython.final
+@cython.internal
+cdef class _UnicodeStringReader:
+    cdef str _data
+    cdef size_t _pos
+    cdef size_t _remaining
+
+    def __cinit__(self, unicode_string: str):
+        self._data = unicode_string
+        self._remaining = <size_t> len(unicode_string)
+
+    def read(self, Py_ssize_t count):
+        if self._remaining == 0:
+            return b''
+
+        if <size_t> count > self._remaining:
+            # On negative or large counts, clip to the end of the string.
+            # Python's files do that for negative counts, too.
+            count = self._remaining
+            self._remaining = 0
+        else:
+            self._remaining -= <size_t> count
+
+        cdef size_t pos = self._pos
+        self._pos = pos + <size_t> count
+
+        data = self._data[pos: pos+count].encode('utf8')
+
+        if self._remaining == 0:
+            self._data = ''  # a good time to clean up
+        return data
+
+
 ############################################################
 ## support for custom document loaders
 ############################################################
 
 cdef xmlparser.xmlParserInput* _local_resolver(const_char* c_url, const_char* c_pubid,
-                                               xmlparser.xmlParserCtxt* c_context) noexcept with gil:
-    cdef _ResolverContext context
+                                               xmlparser.xmlParserCtxt* c_context) noexcept nogil:
+    # Legacy libxml2 pre-2.14 interface.
     cdef xmlparser.xmlParserInput* c_input
-    cdef _InputDocument doc_ref
-    cdef _FileReaderContext file_context
-    # if there is no _ParserContext associated with the xmlParserCtxt
-    # passed, check to see if the thread state object has an implied
-    # context.
-    if c_context._private is not NULL:
-        context = <_ResolverContext>c_context._private
-    else:
-        context = __GLOBAL_PARSER_CONTEXT.findImpliedContext()
+    _local_resource_loader_internal(c_context, c_url, c_pubid, 0, 0, &c_input)
+    return c_input
 
-    if context is None:
-        if __DEFAULT_ENTITY_LOADER is NULL:
-            return NULL
+
+cdef xmlerror.xmlParserErrors _local_resource_loader(
+        void *c_context_ptr, const char *c_url, const char *c_pubid, int type, int flags, xmlparser.xmlParserInput **c_input_out) noexcept nogil:
+    # actually "xmlResourceType type, xmlParserInputFlags flags"
+    # New libxml2 2.14+ interface.
+
+    return _local_resource_loader_internal(
+        <xmlparser.xmlParserCtxt*> c_context_ptr, c_url, c_pubid, type, flags, c_input_out)
+
+
+cdef xmlerror.xmlParserErrors _local_resource_loader_internal(
+        xmlparser.xmlParserCtxt* c_context,
+        const char *c_url, const char *c_pubid, int type, int flags, xmlparser.xmlParserInput **c_input_out) noexcept with gil:
+
+    cdef _ResolverContext context
+    cdef xmlparser.xmlParserInput* c_input = NULL
+    cdef _InputDocument doc_ref
+
+    # If there is no _ParserContext associated with the xmlParserCtxt passed,
+    # see if the thread state object has an implied context.
+    if c_context is NULL or c_context._private is NULL:
+        context = __GLOBAL_PARSER_CONTEXT.findImpliedContext()
+    else:
+        context = <_ResolverContext> c_context._private
+
+    if context is not None:
+        try:
+            # parsing a related document (DTD etc.) => UTF-8 encoded URL?
+            url = _decodeFilename(<const_xmlChar*> c_url) if c_url is not NULL else None
+            pubid = funicodeOrNone(<const_xmlChar*> c_pubid)  # always UTF-8
+
+            doc_ref = context._resolvers.resolve(url, pubid, context)
+
+            if doc_ref is not None:
+                c_error = _resolve_doc_ref(doc_ref, c_context, context, url, &c_input)
+                if c_error != xmlerror.XML_ERR_OK:
+                    return <xmlerror.xmlParserErrors> c_error
+        except:
+            context._store_raised()
+            c_input_out[0] = NULL
+            # Do not let libxml2 report an error itself.
+            return xmlerror.XML_ERR_OK
+
+    if c_input is NULL and __DEFAULT_ENTITY_LOADER is not NULL:
         with nogil:
             # free the GIL as we might do serious I/O here (e.g. HTTP)
             c_input = __DEFAULT_ENTITY_LOADER(c_url, c_pubid, c_context)
-        return c_input
 
-    try:
-        if c_url is NULL:
-            url = None
-        else:
-            # parsing a related document (DTD etc.) => UTF-8 encoded URL?
-            url = _decodeFilename(<const_xmlChar*>c_url)
-        if c_pubid is NULL:
-            pubid = None
-        else:
-            pubid = funicode(<const_xmlChar*>c_pubid) # always UTF-8
+    c_input_out[0] = c_input  # may be NULL
+    return xmlerror.XML_ERR_OK
 
-        doc_ref = context._resolvers.resolve(url, pubid, context)
-    except:
-        context._store_raised()
-        return NULL
 
-    if doc_ref is not None:
-        if doc_ref._type == PARSER_DATA_STRING:
-            data = doc_ref._data_bytes
-            filename = doc_ref._filename
-            if not filename:
+# returns 'xmlerror.xmlParserErrors' or -1 for exception
+cdef int _resolve_doc_ref(
+        _InputDocument doc_ref, xmlparser.xmlParserCtxt* c_context, _ResolverContext context, url,
+        xmlparser.xmlParserInput** c_input_out) except -1:
+
+    cdef xmlparser.xmlParserInput* c_input
+    cdef _FileReaderContext file_context
+    cdef xmlerror.xmlParserErrors c_return_code = xmlerror.XML_ERR_OK
+
+    if doc_ref._type == PARSER_DATA_STRING:
+        data_bytes = doc_ref._data_bytes
+        data = data_bytes
+        filename = doc_ref._filename
+        if not filename:
+            filename = None
+        elif not isinstance(filename, bytes):
+            # most likely a text URL
+            filename = filename.encode('utf8')
+            if not isinstance(filename, bytes):
                 filename = None
-            elif not isinstance(filename, bytes):
-                # most likely a text URL
-                filename = filename.encode('utf8')
-                if not isinstance(filename, bytes):
-                    filename = None
 
-            if tree.LIBXML_VERSION >= 21400:
-                c_filename = <char *>tree.xmlStrdup(_xcstr(filename)) if filename is not None else NULL
-                c_input = xmlparser.xmlNewInputFromMemory(
-                    c_filename, _xcstr(data), <size_t> python.PyBytes_GET_SIZE(data), 0)
-            else:
-                c_input = xmlparser.xmlNewInputStream(c_context)
-                if c_input is not NULL:
-                    if filename is not None:
-                        c_input.filename = <char *>tree.xmlStrdup(_xcstr(filename))
-                    c_input.base = _xcstr(data)
-                    c_input.length = python.PyBytes_GET_SIZE(data)
-                    c_input.cur = c_input.base
-                    c_input.end = c_input.base + c_input.length
-        elif doc_ref._type == PARSER_DATA_FILENAME:
-            data = None
-            c_filename = _cstr(doc_ref._filename)
-            with nogil:
-                # free the GIL as we might do serious I/O here
-                c_input = xmlparser.xmlNewInputFromFile(
-                    c_context, c_filename)
-        elif doc_ref._type == PARSER_DATA_FILE:
-            file_context = _FileReaderContext(doc_ref._file, context, url,
-                                              None, doc_ref._close_file)
-            c_input = file_context._createParserInput(c_context)
-            data = file_context
+        if tree.LIBXML_VERSION >= 21400:
+            c_filename = <char *>tree.xmlStrdup(_xcstr(filename)) if filename is not None else NULL
+            c_input = xmlparser.xmlNewInputFromMemory(
+                c_filename, _xcstr(data_bytes), <size_t> len(data_bytes), 0)
         else:
-            data = None
-            c_input = NULL
+            c_input = xmlparser.xmlNewInputStream(c_context)
+            if c_input is not NULL:
+                if filename is not None:
+                    c_input.filename = <char *>tree.xmlStrdup(_xcstr(filename))
+                c_input.base = _xcstr(data_bytes)
+                c_input.length = len(data_bytes)
+                c_input.cur = c_input.base
+                c_input.end = c_input.base + c_input.length
 
-        if data is not None:
-            context._storage.add(data)
-        if c_input is not NULL:
-            return c_input
+        if c_input is NULL:
+            c_return_code = xmlerror.xmlParserErrors.XML_ERR_NO_MEMORY
 
-    if __DEFAULT_ENTITY_LOADER is NULL:
-        return NULL
+    elif doc_ref._type == PARSER_DATA_FILENAME:
+        data = None
+        c_filename = _cstr(doc_ref._filename)
+        error_return = xmlerror.xmlParserErrors.XML_IO_ENOENT  # Report "File not found" if this fails.
+        with nogil:
+            # free the GIL as we might do serious I/O here
+            c_input = xmlparser.xmlNewInputFromFile(c_context, c_filename)
 
-    with nogil:
-        # free the GIL as we might do serious I/O here (e.g. HTTP)
-        c_input = __DEFAULT_ENTITY_LOADER(c_url, c_pubid, c_context)
-    return c_input
+        if c_input is NULL:
+            c_return_code = xmlerror.xmlParserErrors.XML_IO_ENOENT  # File not found
+
+    elif doc_ref._type == PARSER_DATA_FILE:
+        file_context = _FileReaderContext(doc_ref._file, context, url,
+                                            None, doc_ref._close_file)
+        c_input = file_context._createParserInput(c_context)
+        data = file_context
+
+    else:
+        data = None
+        c_input = NULL
+
+    if c_input is not NULL and data is not None:
+        context._storage.add(data)
+
+    c_input_out[0] = c_input
+    return c_return_code
+
 
 cdef xmlparser.xmlExternalEntityLoader __DEFAULT_ENTITY_LOADER
 __DEFAULT_ENTITY_LOADER = xmlparser.xmlGetExternalEntityLoader()
 
 
-cdef xmlparser.xmlExternalEntityLoader _register_document_loader() noexcept nogil:
+cdef cython.pymutex _doc_loader_config_lock
+
+@cython.final
+@cython.internal
+cdef class _DocLoaderConfig:
+    cdef xmlparser.xmlExternalEntityLoader _old_entity_loader
+
+    @cython.inline
+    cdef void __enter__(self) noexcept:
+        _doc_loader_config_lock.acquire()
+        self._old_entity_loader = xmlparser.xmlGetExternalEntityLoader()
+        xmlparser.xmlSetExternalEntityLoader(<xmlparser.xmlExternalEntityLoader> _local_resolver)
+
+    def __exit__(self, exc_type, exc_value, exc_tb):
+        xmlparser.xmlSetExternalEntityLoader(self._old_entity_loader)
+        _doc_loader_config_lock.release()
+
+
+cdef _DocLoaderConfig lxml_document_loader = _DocLoaderConfig()
+
+
+cdef xmlparser.xmlExternalEntityLoader _register_resource_loader() noexcept nogil:
+    # libxml2 2.14 has per-context document loaders.
+    if tree.LIBXML_VERSION >= 21400:
+        return NULL
+
     cdef xmlparser.xmlExternalEntityLoader old = xmlparser.xmlGetExternalEntityLoader()
     xmlparser.xmlSetExternalEntityLoader(<xmlparser.xmlExternalEntityLoader> _local_resolver)
     return old
 
-cdef void _reset_document_loader(xmlparser.xmlExternalEntityLoader old) noexcept nogil:
+
+cdef void _reset_resource_loader(xmlparser.xmlExternalEntityLoader old) noexcept nogil:
+    # libxml2 2.14 has per-context document loaders. Nothing to reset for us.
+    if tree.LIBXML_VERSION >= 21400:
+        return
     xmlparser.xmlSetExternalEntityLoader(old)
 
 
@@ -542,23 +662,21 @@ cdef void _reset_document_loader(xmlparser.xmlExternalEntityLoader old) noexcept
 @cython.internal
 cdef class _ParserContext(_ResolverContext):
     cdef _ErrorLog _error_log
+    cdef _ParserDictionary _dict
     cdef _ParserSchemaValidationContext _validator
     cdef xmlparser.xmlParserCtxt* _c_ctxt
     cdef xmlparser.xmlExternalEntityLoader _orig_loader
-    cdef python.PyThread_type_lock _lock
     cdef _Document _doc
+    cdef cython.pymutex _lock
+    cdef unsigned long _lock_owner_tid
     cdef bint _collect_ids
 
     def __cinit__(self):
         self._collect_ids = True
-        if config.ENABLE_THREADING:
-            self._lock = python.PyThread_allocate_lock()
         self._error_log = _ErrorLog()
+        self._dict = _ParserDictionary()
 
     def __dealloc__(self):
-        if config.ENABLE_THREADING and self._lock is not NULL:
-            python.PyThread_free_lock(self._lock)
-            self._lock = NULL
         if self._c_ctxt is not NULL:
             if <void*>self._validator is not NULL and self._validator is not None:
                 # If the parser was not closed correctly (e.g. interrupted iterparse()),
@@ -583,6 +701,8 @@ cdef class _ParserContext(_ResolverContext):
         """
         self._c_ctxt = c_ctxt
         c_ctxt._private = <void*>self
+        xmlparser.xmlCtxtSetResourceLoader(c_ctxt, <xmlparser.xmlResourceLoader> _local_resource_loader, NULL)
+        self._dict.initParserDict(c_ctxt)
 
     cdef void _resetParserContext(self) noexcept:
         if self._c_ctxt is not NULL:
@@ -597,12 +717,13 @@ cdef class _ParserContext(_ResolverContext):
 
     cdef int prepare(self, bint set_document_loader=True) except -1:
         cdef int result
-        if config.ENABLE_THREADING and self._lock is not NULL:
-            with nogil:
-                result = python.PyThread_acquire_lock(
-                    self._lock, python.WAIT_LOCK)
-            if result == 0:
-                raise ParserError, "parser locking failed"
+        cdef unsigned long current_tid
+        if config.ENABLE_THREADING:
+            current_tid = python.PyThread_get_thread_ident() + 1  # allow 0 == no thread
+            if self._lock_owner_tid == current_tid:
+                raise RuntimeError("Parser is already used by this thread. Raising to prevent deadlock.")
+            self._lock.acquire()
+            self._lock_owner_tid = current_tid
         self._error_log.clear()
         self._doc = None
         # Connect the lxml error log with libxml2's error handling. In the case of parsing
@@ -613,14 +734,20 @@ cdef class _ParserContext(_ResolverContext):
         # parserInternals.c.
         # Need a cast here because older libxml2 releases do not use 'const' in the functype.
         self._c_ctxt.sax.serror = <xmlerror.xmlStructuredErrorFunc> _receiveParserError
-        self._orig_loader = _register_document_loader() if set_document_loader else NULL
+        self._orig_loader = _register_resource_loader() if set_document_loader else NULL
         if self._validator is not None:
-            self._validator.connect(self._c_ctxt, self._error_log)
+            try:
+                self._validator.connect(self._c_ctxt, self._error_log)
+            except:
+                if config.ENABLE_THREADING:
+                    self._lock_owner_tid = 0
+                    self._lock.release()
+                raise
         return 0
 
     cdef int cleanup(self) except -1:
         if self._orig_loader is not NULL:
-            _reset_document_loader(self._orig_loader)
+            _reset_resource_loader(self._orig_loader)
         try:
             if self._validator is not None:
                 self._validator.disconnect()
@@ -629,8 +756,9 @@ cdef class _ParserContext(_ResolverContext):
             self._doc = None
             self._c_ctxt.sax.serror = NULL
         finally:
-            if config.ENABLE_THREADING and self._lock is not NULL:
-                python.PyThread_release_lock(self._lock)
+            if config.ENABLE_THREADING:
+                self._lock_owner_tid = 0
+                self._lock.release()
         return 0
 
     cdef object _handleParseResult(self, _BaseParser parser,
@@ -708,11 +836,11 @@ cdef xmlDoc* _handleParseResult(_ParserContext context,
     # to parse the document.
     cdef bint well_formed
     if result is not NULL:
-        __GLOBAL_PARSER_CONTEXT.initDocDict(result)
+        context._dict.initDocDict(result)
 
     if c_ctxt.myDoc is not NULL:
         if c_ctxt.myDoc is not result:
-            __GLOBAL_PARSER_CONTEXT.initDocDict(c_ctxt.myDoc)
+            context._dict.initDocDict(c_ctxt.myDoc)
             tree.xmlFreeDoc(c_ctxt.myDoc)
         c_ctxt.myDoc = NULL
 
@@ -832,24 +960,43 @@ cdef inline int _fixHtmlDictNodeNames(tree.xmlDict* c_dict,
     return 0
 
 
+cdef extern from *:
+    """
+    typedef struct {
+        unsigned int for_html: 1;
+        unsigned int remove_comments: 1;
+        unsigned int remove_pis: 1;
+        unsigned int strip_cdata: 1;
+        unsigned int collect_ids: 1;
+        unsigned int resolve_external_entities: 1;
+    } __lxml_ParserFlags;
+    """
+    ctypedef struct ParserFlags "__lxml_ParserFlags":
+        bint for_html
+        bint remove_comments
+        bint remove_pis
+        bint strip_cdata
+        bint collect_ids
+        bint resolve_external_entities
+
+
 @cython.internal
 cdef class _BaseParser:
     cdef ElementClassLookup _class_lookup
     cdef _ResolverRegistry _resolvers
     cdef _ParserContext _parser_context
     cdef _ParserContext _push_parser_context
+    cdef RWLock _lock
     cdef int _parse_options
-    cdef bint _for_html
-    cdef bint _remove_comments
-    cdef bint _remove_pis
-    cdef bint _strip_cdata
-    cdef bint _collect_ids
-    cdef bint _resolve_external_entities
+    cdef ParserFlags _flags
     cdef XMLSchema _schema
     cdef bytes _filename
     cdef readonly object target
     cdef object _default_encoding
     cdef tuple _events_to_collect  # (event_types, tag)
+
+    def __cinit__(self):
+        self._lock = RWLock()
 
     def __init__(self, int parse_options, bint for_html, XMLSchema schema,
                  remove_comments, remove_pis, strip_cdata, collect_ids,
@@ -863,15 +1010,17 @@ cdef class _BaseParser:
             parse_options |= xmlparser.XML_PARSE_SKIP_IDS
 
         self._parse_options = parse_options
-        self.target = target
-        self._for_html = for_html
-        self._remove_comments = remove_comments
-        self._remove_pis = remove_pis
-        self._strip_cdata = strip_cdata
-        self._collect_ids = collect_ids
-        self._resolve_external_entities = resolve_external_entities
-        self._schema = schema
+        self._flags = ParserFlags(
+            for_html=for_html,
+            remove_comments=remove_comments,
+            remove_pis=remove_pis,
+            strip_cdata=strip_cdata,
+            collect_ids=collect_ids,
+            resolve_external_entities=resolve_external_entities,
+        )
 
+        self.target = target
+        self._schema = schema
         self._resolvers = _ResolverRegistry()
 
         if encoding is None:
@@ -897,33 +1046,59 @@ cdef class _BaseParser:
 
     cdef _ParserContext _getParserContext(self):
         cdef xmlparser.xmlParserCtxt* pctxt
-        if self._parser_context is None:
-            self._parser_context = self._createContext(self.target, None)
-            self._parser_context._collect_ids = self._collect_ids
-            if self._schema is not None:
-                self._parser_context._validator = \
-                    self._schema._newSaxValidator(
-                        self._parse_options & xmlparser.XML_PARSE_DTDATTR)
-            pctxt = self._newParserCtxt()
-            _initParserContext(self._parser_context, self._resolvers, pctxt)
-            self._configureSaxContext(pctxt)
-        return self._parser_context
+        context = self._parser_context
+        if context is not None:
+            return context
+
+        context = self._createContext(self.target, None)
+
+        context._collect_ids = self._flags.collect_ids
+        if self._parse_options & xmlparser.XML_PARSE_HUGE:
+            context._dict.disableSizeLimit()
+
+        if self._schema is not None:
+            context._validator = self._schema._newSaxValidator(
+                self._parse_options & xmlparser.XML_PARSE_DTDATTR)
+
+        pctxt = self._newParserCtxt()
+        _initParserContext(context, self._resolvers, pctxt)
+        self._configureSaxContext(pctxt)
+
+        with cython.critical_section(self):
+            if self._parser_context is None:
+                self._parser_context = context
+            else:
+                # Race condition, discard newly created context and reuse existing one.
+                context = self._parser_context
+        return context
 
     cdef _ParserContext _getPushParserContext(self):
         cdef xmlparser.xmlParserCtxt* pctxt
-        if self._push_parser_context is None:
-            self._push_parser_context = self._createContext(
-                self.target, self._events_to_collect)
-            self._push_parser_context._collect_ids = self._collect_ids
-            if self._schema is not None:
-                self._push_parser_context._validator = \
-                    self._schema._newSaxValidator(
-                        self._parse_options & xmlparser.XML_PARSE_DTDATTR)
-            pctxt = self._newPushParserCtxt()
-            _initParserContext(
-                self._push_parser_context, self._resolvers, pctxt)
-            self._configureSaxContext(pctxt)
-        return self._push_parser_context
+        context = self._push_parser_context
+        if context is not None:
+            return context
+
+        context = self._createContext(self.target, self._events_to_collect)
+
+        context._collect_ids = self._flags.collect_ids
+        if self._parse_options & xmlparser.XML_PARSE_HUGE:
+            context._dict.disableSizeLimit()
+
+        if self._schema is not None:
+            context._validator = self._schema._newSaxValidator(
+                self._parse_options & xmlparser.XML_PARSE_DTDATTR)
+
+        pctxt = self._newPushParserCtxt()
+        _initParserContext(context, self._resolvers, pctxt)
+        self._configureSaxContext(pctxt)
+
+        with cython.critical_section(self):
+            if self._push_parser_context is None:
+                self._push_parser_context = context
+            else:
+                # Race condition, discard newly created context and reuse existing one.
+                context = self._push_parser_context
+        return context
 
     cdef _ParserContext _createContext(self, target, events_to_collect):
         """
@@ -945,14 +1120,14 @@ cdef class _BaseParser:
 
     @cython.final
     cdef int _configureSaxContext(self, xmlparser.xmlParserCtxt* pctxt) except -1:
-        if self._remove_comments:
+        if self._flags.remove_comments:
             pctxt.sax.comment = NULL
-        if self._remove_pis:
+        if self._flags.remove_pis:
             pctxt.sax.processingInstruction = NULL
-        if self._strip_cdata:
+        if self._flags.strip_cdata:
             # hard switch-off for CDATA nodes => makes them plain text
             pctxt.sax.cdataBlock = NULL
-        if not self._resolve_external_entities:
+        if not self._flags.resolve_external_entities:
             pctxt.sax.getEntity = _getInternalEntityOnly
             pctxt.sax.getParameterEntity = NULL  # Disable parameter entities completely.
 
@@ -980,7 +1155,7 @@ cdef class _BaseParser:
         Create and initialise a libxml2-level parser context.
         """
         cdef xmlparser.xmlParserCtxt* c_ctxt
-        if self._for_html:
+        if self._flags.for_html:
             c_ctxt = htmlparser.htmlCreateMemoryParserCtxt('dummy', 5)
             if c_ctxt is not NULL:
                 self._registerHtmlErrorHandler(c_ctxt)
@@ -993,8 +1168,8 @@ cdef class _BaseParser:
 
     cdef xmlparser.xmlParserCtxt* _newPushParserCtxt(self) except NULL:
         cdef xmlparser.xmlParserCtxt* c_ctxt
-        cdef char* c_filename = _cstr(self._filename) if self._filename is not None else NULL
-        if self._for_html:
+        cdef const char* c_filename = _cstr(self._filename) if self._filename is not None else NULL
+        if self._flags.for_html:
             c_ctxt = htmlparser.htmlCreatePushParserCtxt(
                 NULL, NULL, NULL, 0, c_filename, tree.XML_CHAR_ENCODING_NONE)
             if c_ctxt is not NULL:
@@ -1009,6 +1184,14 @@ cdef class _BaseParser:
             raise MemoryError()
         c_ctxt.sax.startDocument = _initSaxDocument
         return c_ctxt
+
+    @cython.final
+    cdef void initDocDict(self, tree.xmlDoc *c_doc) noexcept:
+        self._getParserContext()._dict.initDocDict(c_doc)
+
+    @cython.final
+    cdef tree.xmlDict* getDict(self) noexcept:
+        return self._getParserContext()._dict.getDict()
 
     @property
     def error_log(self):
@@ -1028,6 +1211,15 @@ cdef class _BaseParser:
         """The version of the underlying XML parser."""
         return "libxml2 %d.%d.%d" % LIBXML_VERSION
 
+    @property
+    def dict_size(self):
+        cdef size_t size = 0
+        if self._parser_context is not None:
+            size += self._parser_context._dict.getDictSize()
+        if self._push_parser_context is not None:
+            size += self._push_parser_context._dict.getDictSize()
+        return size
+
     def set_element_class_lookup(self, ElementClassLookup lookup = None):
         """set_element_class_lookup(self, lookup = None)
 
@@ -1042,10 +1234,7 @@ cdef class _BaseParser:
         cdef _BaseParser parser
         parser = self.__class__()
         parser._parse_options = self._parse_options
-        parser._for_html = self._for_html
-        parser._remove_comments = self._remove_comments
-        parser._remove_pis = self._remove_pis
-        parser._strip_cdata = self._strip_cdata
+        parser._flags = self._flags
         parser._filename = self._filename
         parser._resolvers = self._resolvers
         parser.target = self.target
@@ -1067,12 +1256,13 @@ cdef class _BaseParser:
 
         Creates a new element associated with this parser.
         """
-        return _makeElement(_tag, NULL, None, self, None, None,
-                            attrib, nsmap, _extra)
+        return _makeElement(
+            _tag, NULL, doc=None, parser=self,
+            text=None, tail=None, attrib=attrib, nsmap=nsmap, extra_attrs=_extra)
 
     # internal parser methods
 
-    cdef xmlDoc* _parseUnicodeDoc(self, utext, char* c_filename) except NULL:
+    cdef xmlDoc* _parseUnicodeDoc(self, utext, const char* c_filename) except NULL:
         """Parse unicode document, share dictionary if possible.
         """
         cdef _ParserContext context
@@ -1117,10 +1307,9 @@ cdef class _BaseParser:
         context.prepare()
         try:
             pctxt = context._c_ctxt
-            __GLOBAL_PARSER_CONTEXT.initParserDict(pctxt)
             orig_options = pctxt.options
             with nogil:
-                if self._for_html:
+                if self._flags.for_html:
                     result = htmlparser.htmlCtxtReadMemory(
                         pctxt, c_text, buffer_len, c_filename, c_encoding,
                         self._parse_options)
@@ -1138,47 +1327,28 @@ cdef class _BaseParser:
         finally:
             context.cleanup()
 
-    cdef xmlDoc* _parseDoc(self, const char* c_text, int c_len, char* c_filename) except NULL:
+    cdef xmlDoc* _parseDoc(self, const char* c_text, int c_len, const char* c_filename) except NULL:
         """Parse document, share dictionary if possible.
         """
         cdef _ParserContext context
         cdef xmlDoc* result
         cdef xmlparser.xmlParserCtxt* pctxt
-        cdef char* c_encoding
+        cdef const char* c_encoding
         cdef tree.xmlCharEncoding enc
         context = self._getParserContext()
         context.prepare()
         try:
-            pctxt = context._c_ctxt
-            __GLOBAL_PARSER_CONTEXT.initParserDict(pctxt)
-
-            if self._default_encoding is None:
-                c_encoding = NULL
-                # libxml2 (at least 2.9.3) does not recognise UTF-32 BOMs
-                # NOTE: limit to problematic cases because it changes character offsets
-                if c_len >= 4 and (c_text[0] == b'\xFF' and c_text[1] == b'\xFE' and
-                                   c_text[2] == 0 and c_text[3] == 0):
-                    c_encoding = "UTF-32LE"
-                    c_text += 4
-                    c_len -= 4
-                elif c_len >= 4 and (c_text[0] == 0 and c_text[1] == 0 and
-                                     c_text[2] == b'\xFE' and c_text[3] == b'\xFF'):
-                    c_encoding = "UTF-32BE"
-                    c_text += 4
-                    c_len -= 4
-                else:
-                    # no BOM => try to determine encoding
-                    enc = tree.xmlDetectCharEncoding(<const_xmlChar*>c_text, c_len)
-                    if enc == tree.XML_CHAR_ENCODING_UCS4LE:
-                        c_encoding = 'UTF-32LE'
-                    elif enc == tree.XML_CHAR_ENCODING_UCS4BE:
-                        c_encoding = 'UTF-32BE'
-            else:
+            if self._default_encoding is not None:
                 c_encoding = _cstr(self._default_encoding)
+            else:
+                bom_offset = _detectBOMEncoding(c_text, c_len, &c_encoding)
+                c_text += bom_offset
+                c_len -= bom_offset
 
+            pctxt = context._c_ctxt
             orig_options = pctxt.options
             with nogil:
-                if self._for_html:
+                if self._flags.for_html:
                     result = htmlparser.htmlCtxtReadMemory(
                         pctxt, c_text, c_len, c_filename,
                         c_encoding, self._parse_options)
@@ -1196,27 +1366,23 @@ cdef class _BaseParser:
         finally:
             context.cleanup()
 
-    cdef xmlDoc* _parseDocFromFile(self, char* c_filename) except NULL:
+    cdef xmlDoc* _parseDocFromFile(self, const char* c_filename) except NULL:
         cdef _ParserContext context
         cdef xmlDoc* result
         cdef xmlparser.xmlParserCtxt* pctxt
-        cdef char* c_encoding
+        cdef const char* c_encoding = NULL
         result = NULL
 
         context = self._getParserContext()
         context.prepare()
         try:
-            pctxt = context._c_ctxt
-            __GLOBAL_PARSER_CONTEXT.initParserDict(pctxt)
-
-            if self._default_encoding is None:
-                c_encoding = NULL
-            else:
+            if self._default_encoding is not None:
                 c_encoding = _cstr(self._default_encoding)
 
+            pctxt = context._c_ctxt
             orig_options = pctxt.options
             with nogil:
-                if self._for_html:
+                if self._flags.for_html:
                     result = htmlparser.htmlCtxtReadFile(
                         pctxt, c_filename, c_encoding, self._parse_options)
                     if result is not NULL:
@@ -1232,25 +1398,20 @@ cdef class _BaseParser:
         finally:
             context.cleanup()
 
-    cdef xmlDoc* _parseDocFromFilelike(self, filelike, filename,
-                                       encoding) except NULL:
+    cdef xmlDoc* _parseDocFromFilelike(self, filelike, filename, encoding) except NULL:
         cdef _ParserContext context
         cdef _FileReaderContext file_context
         cdef xmlDoc* result
-        cdef xmlparser.xmlParserCtxt* pctxt
-        cdef char* c_filename
         if not filename:
             filename = None
 
         context = self._getParserContext()
         context.prepare()
         try:
-            pctxt = context._c_ctxt
-            __GLOBAL_PARSER_CONTEXT.initParserDict(pctxt)
             file_context = _FileReaderContext(
                 filelike, context, filename,
                 encoding or self._default_encoding)
-            result = file_context._readDoc(pctxt, self._parse_options)
+            result = file_context._readDoc(context._c_ctxt, self._parse_options)
 
             return context._handleParseResultDoc(
                 self, result, filename)
@@ -1293,7 +1454,7 @@ cdef tree.xmlEntity* _getInternalEntityOnly(void* ctxt, const_xmlChar* name) noe
             message=b"External entity resolution is disabled for security reasons "
                     b"when resolving '&%s;'. Use 'XMLParser(resolve_entities=True)' "
                     b"if you consider it safe to enable it.",
-            file=parser_input.filename,
+            file=<char*> parser_input.filename,
             node=entity,
             str1=<char*> name,
             str2=NULL,
@@ -1319,8 +1480,8 @@ cdef void _initSaxDocument(void* ctxt) noexcept with gil:
     if c_doc and c_ctxt.dict and not c_doc.dict:
         # I have no idea why libxml2 disables this - we need it
         c_ctxt.dictNames = 1
+        tree.xmlDictReference(c_ctxt.dict)
         c_doc.dict = c_ctxt.dict
-        xmlparser.xmlDictReference(c_ctxt.dict)
 
     # set up XML ID hash table
     if c_ctxt._private:
@@ -1329,10 +1490,11 @@ cdef void _initSaxDocument(void* ctxt) noexcept with gil:
             # keep the global parser dict from filling up with XML IDs
             if c_doc and not c_doc.ids:
                 # memory errors are not fatal here
-                c_dict = xmlparser.xmlDictCreate()
+                c_dict = tree.xmlDictCreate()
                 if c_dict:
+                    tree.xmlDictSetLimit(c_dict, 0)
                     c_doc.ids = tree.xmlHashCreateDict(0, c_dict)
-                    xmlparser.xmlDictFree(c_dict)
+                    tree.xmlDictFree(c_dict)
                 else:
                     c_doc.ids = tree.xmlHashCreate(0)
         else:
@@ -1343,12 +1505,40 @@ cdef void _initSaxDocument(void* ctxt) noexcept with gil:
                 c_doc.ids = NULL
 
 
+cdef int _detectBOMEncoding(const char* c_text, int c_len, const char** c_encoding):
+    """Detect the text encoding and return the BOM length to skip, if any."""
+    # libxml2 (at least 2.9.3) does not recognise UTF-32 BOMs
+    # NOTE: limit to problematic cases because it changes character offsets
+    cdef const char* c_enc = NULL
+    cdef int offset = 0
+    if c_len >= 4 and (c_text[0] == b'\xFF' and c_text[1] == b'\xFE' and
+                            c_text[2] == 0 and c_text[3] == 0):
+        c_enc = "UTF-32LE"
+        offset = 4
+    elif c_len >= 4 and (c_text[0] == 0 and c_text[1] == 0 and
+                            c_text[2] == b'\xFE' and c_text[3] == b'\xFF'):
+        c_enc = "UTF-32BE"
+        offset = 4
+    else:
+        # no BOM => try to determine encoding
+        enc = tree.xmlDetectCharEncoding(<const_xmlChar*>c_text, c_len)
+        if enc == tree.XML_CHAR_ENCODING_UCS4LE:
+            c_enc = 'UTF-32LE'
+        elif enc == tree.XML_CHAR_ENCODING_UCS4BE:
+            c_enc = 'UTF-32BE'
+
+    if c_encoding is not NULL:
+        c_encoding[0] = c_enc
+    return offset
+
+
 ############################################################
 ## ET feed parser
 ############################################################
 
 cdef class _FeedParser(_BaseParser):
     cdef bint _feed_parser_running
+    cdef cython.pymutex _feed_lock
 
     @property
     def feed_error_log(self):
@@ -1359,7 +1549,7 @@ cdef class _FeedParser(_BaseParser):
         """
         return self._getPushParserContext()._error_log.copy()
 
-    cpdef feed(self, data):
+    def feed(self, data):
         """feed(self, data)
 
         Feeds data to the parser.  The argument should be an 8-bit string
@@ -1377,6 +1567,11 @@ cdef class _FeedParser(_BaseParser):
         usage.  You can use the same parser as a feed parser and in
         the ``parse()`` function concurrently.
         """
+        with self._feed_lock:
+            self._feed(data)
+
+    @cython.final
+    cdef _feed(self, data):
         cdef _ParserContext context
         cdef bytes bstring
         cdef xmlparser.xmlParserCtxt* pctxt
@@ -1393,7 +1588,7 @@ cdef class _FeedParser(_BaseParser):
             else:
                 c_encoding = self._default_encoding
             char_data = _cstr(data)
-            py_buffer_len = python.PyBytes_GET_SIZE(data)
+            py_buffer_len = len(<bytes> data)
             ustart = 0
         elif isinstance(data, unicode):
             c_encoding = b"UTF-8"
@@ -1419,8 +1614,8 @@ cdef class _FeedParser(_BaseParser):
             buffer_len = 0
             if char_data is not NULL:
                 buffer_len = 4 if py_buffer_len > 4 else <int>py_buffer_len
-            orig_loader = _register_document_loader()
-            if self._for_html:
+            orig_loader = _register_resource_loader()
+            if self._flags.for_html:
                 error = _htmlCtxtResetPush(
                     pctxt, char_data, buffer_len, c_filename, c_encoding,
                     self._parse_options)
@@ -1428,12 +1623,11 @@ cdef class _FeedParser(_BaseParser):
                 xmlparser.xmlCtxtUseOptions(pctxt, self._parse_options)
                 error = xmlparser.xmlCtxtResetPush(
                     pctxt, char_data, buffer_len, c_filename, c_encoding)
-            _reset_document_loader(orig_loader)
+            _reset_resource_loader(orig_loader)
             py_buffer_len -= buffer_len
             char_data += buffer_len
             if error:
                 raise MemoryError()
-            __GLOBAL_PARSER_CONTEXT.initParserDict(pctxt)
 
         #print pctxt.charset, 'NONE' if c_encoding is NULL else c_encoding
 
@@ -1483,7 +1677,7 @@ cdef class _FeedParser(_BaseParser):
             finally:
                 context.cleanup()
 
-    cpdef close(self):
+    def close(self):
         """close(self)
 
         Terminates feeding data to this parser.  This tells the parser to
@@ -1494,6 +1688,11 @@ cdef class _FeedParser(_BaseParser):
         the ``feed()`` method.  It should only be called when using the feed
         parser interface, all other usage is undefined.
         """
+        with self._feed_lock:
+            return self._close()
+
+    @cython.final
+    cdef _close(self):
         if not self._feed_parser_running:
             raise XMLSyntaxError("no element found",
                                  xmlerror.XML_ERR_INTERNAL_ERROR, 0, 0,
@@ -1503,7 +1702,7 @@ cdef class _FeedParser(_BaseParser):
         pctxt = context._c_ctxt
 
         self._feed_parser_running = 0
-        if self._for_html:
+        if self._flags.for_html:
             htmlparser.htmlParseChunk(pctxt, NULL, 0, 1)
         else:
             xmlparser.xmlParseChunk(pctxt, NULL, 0, 1)
@@ -1527,24 +1726,26 @@ cdef class _FeedParser(_BaseParser):
 cdef (int, int) _parse_data_chunk(xmlparser.xmlParserCtxt* c_ctxt,
                                   const char* char_data, int buffer_len):
     fixup_error = 0
-    with nogil:
-        if c_ctxt.html:
-            c_node = c_ctxt.node  # last node where the parser stopped
-            orig_loader = _register_document_loader()
+    if c_ctxt.html:
+        c_node = c_ctxt.node  # last node where the parser stopped
+        with nogil:
+            old_loader = _register_resource_loader()
             error = htmlparser.htmlParseChunk(c_ctxt, char_data, buffer_len, 0)
-            _reset_document_loader(orig_loader)
-            # and now for the fun part: move node names to the dict
-            if c_ctxt.myDoc:
+            _reset_resource_loader(old_loader)
+        # and now for the fun part: move node names to the dict
+        if c_ctxt.myDoc:
+            with nogil:
                 fixup_error = _fixHtmlDictSubtreeNames(
                     c_ctxt.dict, c_ctxt.myDoc, c_node)
                 if c_ctxt.myDoc.dict and c_ctxt.myDoc.dict is not c_ctxt.dict:
-                    xmlparser.xmlDictFree(c_ctxt.myDoc.dict)
+                    tree.xmlDictReference(c_ctxt.dict)
+                    tree.xmlDictFree(c_ctxt.myDoc.dict)
                     c_ctxt.myDoc.dict = c_ctxt.dict
-                    xmlparser.xmlDictReference(c_ctxt.dict)
-        else:
-            orig_loader = _register_document_loader()
+    else:
+        with nogil:
+            old_loader = _register_resource_loader()
             error = xmlparser.xmlParseChunk(c_ctxt, char_data, buffer_len, 0)
-            _reset_document_loader(orig_loader)
+            _reset_resource_loader(old_loader)
     return (error, fixup_error)
 
 
@@ -1603,35 +1804,38 @@ cdef class XMLParser(_FeedParser):
     additionally provide an XMLSchema from which the default
     attributes can be read).
 
-    Available boolean keyword arguments:
+    **Available boolean keyword arguments:**
 
-    - attribute_defaults - inject default attributes from DTD or XMLSchema
-    - dtd_validation     - validate against a DTD referenced by the document
-    - load_dtd           - use DTD for parsing
-    - no_network         - prevent network access for related files (default: True)
-    - decompress         - automatically decompress gzip input
-                           (default: False, changed in lxml 6.0, disabling only affects libxml2 2.15+)
-    - ns_clean           - clean up redundant namespace declarations
-    - recover            - try hard to parse through broken XML
-    - remove_blank_text  - discard blank text nodes that appear ignorable
-    - remove_comments    - discard comments
-    - remove_pis         - discard processing instructions
-    - strip_cdata        - replace CDATA sections by normal text content (default: True)
-    - compact            - save memory for short text content (default: True)
-    - collect_ids        - use a hash table of XML IDs for fast access
-                           (default: True, always True with DTD validation)
-    - huge_tree          - disable security restrictions and support very deep trees
-                           and very long text content
+    - attribute_defaults: inject default attributes from DTD or XMLSchema
+    - dtd_validation: validate against a DTD referenced by the document
+    - load_dtd: use DTD for parsing
+    - no_network: prevent network access for related files (default: True)
+    - decompress: automatically decompress gzip input (default: False,
+      changed in lxml 6.0, disabling only affects libxml2 2.15+)
+    - ns_clean: clean up redundant namespace declarations
+    - recover: try hard to parse through broken XML
+    - remove_blank_text: discard blank text nodes that appear ignorable.
+      Without DTD/schema, a heuristic preserves blank text nodes appearing
+      after non-blank content at the same level.
+    - remove_comments: discard comments
+    - remove_pis: discard processing instructions
+    - strip_cdata: replace CDATA sections by normal text content
+      (default: True)
+    - compact: save memory for short text content (default: True)
+    - collect_ids: use a hash table of XML IDs for fast access
+      (default: True, always True with DTD validation)
+    - huge_tree: disable security restrictions and support very deep trees
+      and very long text content
 
-    Other keyword arguments:
+    **Other keyword arguments:**
 
-    - resolve_entities - replace entities by their text value: False for keeping the
-          entity references, True for resolving them, and 'internal' for resolving
-          internal definitions only (no external file/URL access).
-          The default used to be True and was changed to 'internal' in lxml 5.0.
-    - encoding - override the document encoding (note: libiconv encoding name)
-    - target   - a parser target object that will receive the parse events
-    - schema   - an XMLSchema to validate against
+    - resolve_entities: replace entities by their text value. False for keeping
+      the entity references, True for resolving them, and 'internal' for resolving
+      internal definitions only (no external file/URL access).  The default used
+      to be True and was changed to 'internal' in lxml 5.0.
+    - encoding: override the document encoding (note: libiconv encoding name)
+    - target: a parser target object that will receive the parse events
+    - schema: an XMLSchema to validate against
 
     Note that you should avoid sharing parsers between threads.  While this is
     not harmful, it is more efficient to use separate parsers.  This does not
@@ -1813,26 +2017,29 @@ cdef class HTMLParser(_FeedParser):
     the capabilities of libxml2.  Use the 'recover' option to switch
     this off.
 
-    Available boolean keyword arguments:
+    **Available boolean keyword arguments:**
 
-    - recover            - try hard to parse through broken HTML (default: True)
-    - no_network         - prevent network access for related files (default: True)
-    - decompress         - automatically decompress gzip input
-                           (default: False, changed in lxml 6.0, disabling only affects libxml2 2.15+)
-    - remove_blank_text  - discard empty text nodes that are ignorable (i.e. not actual text content)
-    - remove_comments    - discard comments
-    - remove_pis         - discard processing instructions
-    - compact            - save memory for short text content (default: True)
-    - default_doctype    - add a default doctype even if it is not found in the HTML (default: True)
-    - collect_ids        - use a hash table of XML IDs for fast access (default: True)
-    - huge_tree          - disable security restrictions and support very deep trees
-                           and very long text content
+    - recover: try hard to parse through broken HTML (default: True)
+    - no_network: prevent network access for related files (default: True)
+    - decompress: automatically decompress gzip input (default: False,
+      changed in lxml 6.0, disabling only affects libxml2 2.15+)
+    - remove_blank_text: discard empty text nodes that are ignorable (i.e.
+      not actual text content).  Preserves spacing in mixed-content elements
+      per HTML structural rules.
+    - remove_comments: discard comments
+    - remove_pis: discard processing instructions
+    - compact: save memory for short text content (default: True)
+    - default_doctype: add a default doctype even if it is not found in the
+      HTML (default: True)
+    - collect_ids: use a hash table of XML IDs for fast access (default: True)
+    - huge_tree: disable security restrictions and support very deep trees and
+      very long text content
 
-    Other keyword arguments:
+    **Other keyword arguments:**
 
-    - encoding - override the document encoding (note: libiconv encoding name)
-    - target   - a parser target object that will receive the parse events
-    - schema   - an XMLSchema to validate against
+    - encoding: override the document encoding (note: libiconv encoding name)
+    - target: a parser target object that will receive the parse events
+    - schema: an XMLSchema to validate against
 
     Note that you should avoid sharing parsers between threads for performance
     reasons.
@@ -1911,7 +2118,7 @@ cdef class HTMLPullParser(HTMLParser):
 ############################################################
 
 cdef xmlDoc* _parseDoc(text, filename, _BaseParser parser) except NULL:
-    cdef char* c_filename
+    cdef const char* c_filename
     if parser is None:
         parser = __GLOBAL_PARSER_CONTEXT.getDefaultParser()
     if not filename:
@@ -1920,14 +2127,18 @@ cdef xmlDoc* _parseDoc(text, filename, _BaseParser parser) except NULL:
         filename_utf = _encodeFilenameUTF8(filename)
         c_filename = _cstr(filename_utf)
     if isinstance(text, bytes):
+        if python.IN_LIMITED_API:
+            return parser._parseDocFromFilelike(BytesIO(text), filename, None)
         return _parseDoc_bytes(<bytes> text, filename, c_filename, parser)
     elif isinstance(text, unicode):
+        if python.IN_LIMITED_API:
+            return parser._parseDocFromFilelike(_UnicodeStringReader(text), filename, b'utf-8')
         return _parseDoc_unicode(<unicode> text, filename, c_filename, parser)
     else:
         return _parseDoc_charbuffer(text, filename, c_filename, parser)
 
 
-cdef xmlDoc* _parseDoc_unicode(unicode text, filename, char* c_filename, _BaseParser parser) except NULL:
+cdef xmlDoc* _parseDoc_unicode(text: str, filename, const char* c_filename, _BaseParser parser) except NULL:
     cdef Py_ssize_t c_len
     if python.PyUnicode_IS_READY(text):
         # PEP-393 Unicode string
@@ -1936,19 +2147,18 @@ cdef xmlDoc* _parseDoc_unicode(unicode text, filename, char* c_filename, _BasePa
         # old Py_UNICODE string
         c_len = python.PyUnicode_GET_DATA_SIZE(text)
     if c_len > limits.INT_MAX:
-        return parser._parseDocFromFilelike(
-            StringIO(text), filename, None)
+        return parser._parseDocFromFilelike(_UnicodeStringReader(text), filename, None)
     return parser._parseUnicodeDoc(text, c_filename)
 
 
-cdef xmlDoc* _parseDoc_bytes(bytes text, filename, char* c_filename, _BaseParser parser) except NULL:
+cdef xmlDoc* _parseDoc_bytes(text: bytes, filename, const char* c_filename, _BaseParser parser) except NULL:
     cdef Py_ssize_t c_len = len(text)
     if c_len > limits.INT_MAX:
         return parser._parseDocFromFilelike(BytesIO(text), filename, None)
     return parser._parseDoc(text, c_len, c_filename)
 
 
-cdef xmlDoc* _parseDoc_charbuffer(text, filename, char* c_filename, _BaseParser parser) except NULL:
+cdef xmlDoc* _parseDoc_charbuffer(text, filename, const char* c_filename, _BaseParser parser) except NULL:
     cdef const unsigned char[::1] data = memoryview(text).cast('B')  # cast to 'unsigned char' buffer
     cdef Py_ssize_t c_len = len(data)
     if c_len > limits.INT_MAX:
@@ -1976,7 +2186,6 @@ cdef xmlDoc* _newXMLDoc() except NULL:
         raise MemoryError()
     if result.encoding is NULL:
         result.encoding = tree.xmlStrdup(<unsigned char*>"UTF-8")
-    __GLOBAL_PARSER_CONTEXT.initDocDict(result)
     return result
 
 cdef xmlDoc* _newHTMLDoc() except NULL:
@@ -1984,7 +2193,6 @@ cdef xmlDoc* _newHTMLDoc() except NULL:
     result = tree.htmlNewDoc(NULL, NULL)
     if result is NULL:
         raise MemoryError()
-    __GLOBAL_PARSER_CONTEXT.initDocDict(result)
     return result
 
 
@@ -1998,7 +2206,8 @@ cdef xmlDoc* _copyDoc(xmlDoc* c_doc, int recursive) except NULL:
         result = tree.xmlCopyDoc(c_doc, 0)
     if result is NULL:
         raise MemoryError()
-    __GLOBAL_PARSER_CONTEXT.initDocDict(result)
+    tree.xmlDictReference(c_doc.dict)
+    result.dict = c_doc.dict
     return result
 
 
@@ -2007,9 +2216,12 @@ cdef xmlDoc* _copyDocRoot(xmlDoc* c_doc, xmlNode* c_new_root) except NULL:
     cdef xmlDoc* result
     cdef xmlNode* c_node
     result = tree.xmlCopyDoc(c_doc, 0) # non recursive
-    if result is NULL:
+    if not result:
         raise MemoryError()
-    __GLOBAL_PARSER_CONTEXT.initDocDict(result)
+
+    assert result.dict is NULL
+    tree.xmlDictReference(c_doc.dict)
+    result.dict = c_doc.dict
 
     with nogil:
         c_node = tree.xmlDocCopyNode(c_new_root, result, 1) # recursive
@@ -2026,7 +2238,8 @@ cdef xmlDoc* _copyDocRoot(xmlDoc* c_doc, xmlNode* c_new_root) except NULL:
 cdef xmlNode* _copyNodeToDoc(xmlNode* c_node, xmlDoc* c_doc) except NULL:
     """Recursively copy the element into the document. c_doc is not modified."""
     cdef xmlNode* c_root
-    c_root = tree.xmlDocCopyNode(c_node, c_doc, 1) # recursive
+    with nogil:
+        c_root = tree.xmlDocCopyNode(c_node, c_doc, 1) # recursive
     if c_root is NULL:
         raise MemoryError()
     _copyTail(c_node.next, c_root)
@@ -2065,7 +2278,7 @@ cdef _Document _parseDocument(source, _BaseParser parser, base_url):
     if hasattr(source, 'read'):
         return _parseFilelikeDocument(source, url, parser)
 
-    raise TypeError, f"cannot parse from '{python._fqtypename(source).decode('UTF-8')}'"
+    raise TypeError, f"cannot parse from '{python._fqtypename(source)}'"
 
 cdef _Document _parseDocumentFromURL(url, _BaseParser parser):
     c_doc = _parseDocFromFile(url, parser)

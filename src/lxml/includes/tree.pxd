@@ -3,7 +3,7 @@ from libc.string cimport const_char, const_uchar
 
 cdef extern from "lxml-version.h":
     # deprecated declaration, use etreepublic.pxd instead
-    cdef char* LXML_VERSION_STRING
+    cdef const char* LXML_VERSION_STRING
 
 cdef extern from "libxml/xmlversion.h":
     const char* xmlParserVersion
@@ -11,16 +11,23 @@ cdef extern from "libxml/xmlversion.h":
 
 
 cdef extern from "libxml/xmlstring.h" nogil:
+    """
+    static CYTHON_INLINE int __lx_xmlStrEq(const xmlChar* str1, const xmlChar* str2) {
+        return (str1 == str2) || (strcmp((const char*) str1, (const char*) str2) == 0);
+    }
+    """
     ctypedef unsigned char xmlChar
     ctypedef const xmlChar const_xmlChar "const xmlChar"
-    cdef int xmlStrlen(const_xmlChar* str)
     cdef xmlChar* xmlStrdup(const_xmlChar* cur)
+    cdef int xmlStrcasecmp(const xmlChar *str1, const xmlChar *str2)
+    cdef int xmlStrEqual "__lx_xmlStrEq" (const_xmlChar* str1, const_xmlChar* str2)
+    cdef const_xmlChar* _xcstr "(const xmlChar*)__Pyx_PyBytes_AsString" (object s)
+    # now unused, replaced by <string.h>:
+    cdef int xmlStrlen(const_xmlChar* str)
     cdef int xmlStrncmp(const_xmlChar* str1, const_xmlChar* str2, int length)
     cdef int xmlStrcmp(const_xmlChar* str1, const_xmlChar* str2)
-    cdef int xmlStrcasecmp(const xmlChar *str1, const xmlChar *str2)
     cdef const_xmlChar* xmlStrstr(const_xmlChar* str1, const_xmlChar* str2)
     cdef const_xmlChar* xmlStrchr(const_xmlChar* str1, xmlChar ch)
-    cdef const_xmlChar* _xcstr "(const xmlChar*)PyBytes_AS_STRING" (object s)
 
 cdef extern from "libxml/encoding.h" nogil:
     ctypedef enum xmlCharEncoding:
@@ -77,13 +84,22 @@ cdef extern from "libxml/hash.h":
     cdef int xmlHashSize(xmlHashTable* table) nogil
     cdef void xmlHashFree(xmlHashTable* table, xmlHashDeallocator f) nogil
 
+
 cdef extern from * nogil: # actually "libxml/dict.h"
     # libxml/dict.h appears to be broken to include in C
     ctypedef struct xmlDict
+
+    cdef xmlDict* xmlDictCreate()
+    cdef xmlDict* xmlDictCreateSub(xmlDict* subdict)
+    cdef void xmlDictFree(xmlDict* sub)
+    cdef int xmlDictReference(xmlDict* dict)
     cdef const_xmlChar* xmlDictLookup(xmlDict* dict, const_xmlChar* name, int len)
     cdef const_xmlChar* xmlDictExists(xmlDict* dict, const_xmlChar* name, int len)
     cdef int xmlDictOwns(xmlDict* dict, const_xmlChar* name)
     cdef size_t xmlDictSize(xmlDict* dict)
+    cdef size_t xmlDictSetLimit(xmlDict* dict, size_t limit)
+    cdef size_t xmlDictGetUsage(xmlDict* dict)
+
 
 cdef extern from "libxml/tree.h" nogil:
     ctypedef struct xmlDoc
@@ -323,6 +339,7 @@ cdef extern from "libxml/tree.h" nogil:
     cdef void xmlFreeDoc(xmlDoc* cur)
     cdef void xmlFreeDtd(xmlDtd* cur)
     cdef void xmlFreeNode(xmlNode* cur)
+    cdef void xmlFreeNodeList(xmlNode* cur)
     cdef void xmlFreeNsList(xmlNs* ns)
     cdef void xmlFreeNs(xmlNs* ns)
     cdef void xmlFree(void* buf)
@@ -346,6 +363,7 @@ cdef extern from "libxml/tree.h" nogil:
                                const_xmlChar* name, const_xmlChar* value)
     cdef xmlChar* xmlGetNoNsProp(xmlNode* node, const_xmlChar* name)
     cdef xmlChar* xmlGetNsProp(xmlNode* node, const_xmlChar* name, const_xmlChar* nameSpace)
+    cdef xmlChar* xmlGetProp(xmlNode* node, const_xmlChar* name)
     cdef void xmlSetNs(xmlNode* node, xmlNs* ns)
     cdef xmlAttr* xmlSetProp(xmlNode* node, const_xmlChar* name, const_xmlChar* value)
     cdef xmlAttr* xmlSetNsProp(xmlNode* node, xmlNs* ns,
@@ -379,7 +397,7 @@ cdef extern from "libxml/tree.h" nogil:
     cdef void xmlBufAttrSerializeTxtContent(xmlOutputBuffer *buf, xmlDoc *doc,
                                 xmlAttr *attr, const_xmlChar *string)
     cdef void xmlNodeSetName(xmlNode* cur, const_xmlChar* name)
-    cdef void xmlNodeSetContent(xmlNode* cur, const_xmlChar* content)
+    cdef int xmlNodeSetContent(xmlNode* cur, const_xmlChar* content)
     cdef xmlDtd* xmlCopyDtd(xmlDtd* dtd)
     cdef xmlDoc* xmlCopyDoc(xmlDoc* doc, int recursive)
     cdef xmlNode* xmlCopyNode(xmlNode* node, int extended)

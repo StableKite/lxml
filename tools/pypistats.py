@@ -35,12 +35,12 @@ def version_sorter(version_and_count):
 
 
 def system_sorter(name_and_count):
-    order = ('linux', 'windows', 'darwin')
+    order = ('linux', 'windows', 'darwin')[::-1]
     system = name_and_count[0]
     try:
         return order.index(system.lower())
     except ValueError:
-        return len(order)
+        return 0
 
 
 def print_agg_stats(stats, sort_key=None):
@@ -55,6 +55,7 @@ def print_agg_stats(stats, sort_key=None):
 def main():
     import sys
     package_name = sys.argv[1] if len(sys.argv) > 1 else PACKAGE
+    print("Package:", package_name)
 
     counts = get_stats("python_minor", package=package_name)
     stats = aggregate(counts)

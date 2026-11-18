@@ -1,15 +1,16 @@
 # support for DTD validation
 from lxml.includes cimport dtdvalid
 
-cdef class DTDError(LxmlError):
+
+class DTDError(LxmlError):
     """Base class for DTD errors.
     """
 
-cdef class DTDParseError(DTDError):
+class DTDParseError(DTDError):
     """Error while parsing a DTD.
     """
 
-cdef class DTDValidateError(DTDError):
+class DTDValidateError(DTDError):
     """Error while validating an XML document with a DTD.
     """
 
@@ -276,28 +277,27 @@ cdef class DTD(_Validator):
     catalog.
     """
     cdef tree.xmlDtd* _c_dtd
+
     def __init__(self, file=None, *, external_id=None):
+        if self._c_dtd is not NULL:
+            raise RuntimeError("Repeated call to DTD.__init__()")
+
         _Validator.__init__(self)
         if file is not None:
             file = _getFSPathOrObject(file)
             if _isString(file):
                 file = _encodeFilename(file)
-                with self._error_log:
-                    orig_loader = _register_document_loader()
+                with self._error_log, lxml_document_loader:
                     self._c_dtd = xmlparser.xmlParseDTD(NULL, _xcstr(file))
-                    _reset_document_loader(orig_loader)
             elif hasattr(file, 'read'):
-                orig_loader = _register_document_loader()
-                self._c_dtd = _parseDtdFromFilelike(file)
-                _reset_document_loader(orig_loader)
+                with lxml_document_loader:
+                    self._c_dtd = _parseDtdFromFilelike(file)
             else:
                 raise DTDParseError, "file must be a filename, file-like or path-like object"
         elif external_id is not None:
             external_id_utf = _utf8(external_id)
-            with self._error_log:
-                orig_loader = _register_document_loader()
+            with self._error_log, lxml_document_loader:
                 self._c_dtd = xmlparser.xmlParseDTD(<const_xmlChar*>external_id_utf, NULL)
-                _reset_document_loader(orig_loader)
         else:
             raise DTDParseError, "either filename or external ID required"
 
@@ -372,19 +372,21 @@ cdef class DTD(_Validator):
 
         valid_ctxt = dtdvalid.xmlNewValidCtxt()
         if valid_ctxt is NULL:
-            raise DTDError("Failed to create validation context")
+            raise MemoryError()
 
         # work around error reporting bug in libxml2 <= 2.9.1 (and later?)
         # https://bugzilla.gnome.org/show_bug.cgi?id=724903
         valid_ctxt.error = <dtdvalid.xmlValidityErrorFunc>_nullGenericErrorFunc
         valid_ctxt.userData = NULL
 
+        doc.lock_fakedoc()
         try:
             with self._error_log:
                 c_doc = _fakeRootDoc(doc._c_doc, root_node._c_node)
                 ret = dtdvalid.xmlValidateDtd(valid_ctxt, c_doc, self._c_dtd)
                 _destroyFakeDoc(doc._c_doc, c_doc)
         finally:
+            doc.unlock_fakedoc()
             dtdvalid.xmlFreeValidCtxt(valid_ctxt)
 
         if ret == -1:

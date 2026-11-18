@@ -7,6 +7,7 @@ except ImportError:
         compiled = False
         def cfunc(self, func): return func
         def cclass(self, func): return func
+        def final(self, func): return func
         def declare(self, _, value): return value
         def __getattr__(self, type_name): return "object"
 
@@ -208,11 +209,14 @@ def htmldiff(old_html, new_html):
     new_html_tokens = tokenize(new_html)
     result = htmldiff_tokens(old_html_tokens, new_html_tokens)
     try:
-        result = ''.join(result).strip()
+        result = ''.join(result)
     except (ValueError, TypeError) as exc:
-        print(exc)
-        result = ''
-    return fixup_ins_del_tags(result)
+        print(f"htmldiff failed joining result chunks: {exc}", 
+                            'old_tokens:', f"{len(old_html_tokens)}",
+                            'new_tokens:', f"{len(new_html_tokens)}"                            
+                            )
+        raise RuntimeError(f"HTML diff algorithm error: {exc}") from exc
+    return fixup_ins_del_tags(result.strip())
 
 
 def htmldiff_tokens(html1_tokens, html2_tokens):

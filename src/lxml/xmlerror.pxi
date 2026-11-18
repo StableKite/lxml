@@ -38,7 +38,7 @@ cdef void _initThreadLogging() noexcept:
 cdef class _LogEntry:
     """A log message entry from an error log.
 
-    Attributes:
+    **Attributes:**
 
     - message: the message text
     - domain: the domain ID (see lxml.etree.ErrorDomains)
@@ -374,14 +374,14 @@ cdef class _ListErrorLog(_BaseErrorLog):
         Convenience method to get all fatal error messages.
         """
         return self.filter_from_level(ErrorLevels.FATAL)
-    
+
     def filter_from_errors(self):
         """filter_from_errors(self)
 
         Convenience method to get all error messages or worse.
         """
         return self.filter_from_level(ErrorLevels.ERROR)
-    
+
     def filter_from_warnings(self):
         """filter_from_warnings(self)
 
@@ -447,40 +447,51 @@ cdef class _ErrorLog(_ListErrorLog):
 
     @cython.final
     cdef int connect(self) except -1:
-        self._first_error = None
-        del self._entries[:]
+        with cython.critical_section(self._entries):
+            self._first_error = None
+            del self._entries[:]
 
         cdef _ErrorLogContext context = _ErrorLogContext.__new__(_ErrorLogContext)
-        context.push_error_log(self)
-        self._logContexts.append(context)
+        with cython.critical_section(self._logContexts):
+            context.push_error_log(self)
+            self._logContexts.append(context)
         return 0
 
     @cython.final
     cdef int disconnect(self) except -1:
-        cdef _ErrorLogContext context = self._logContexts.pop()
-        context.pop_error_log()
+        cdef _ErrorLogContext context
+        with cython.critical_section(self._logContexts):
+            context = self._logContexts.pop()
+            context.pop_error_log()
         return 0
 
     cpdef clear(self):
-        self._first_error = None
-        self.last_error = None
-        self._offset = 0
-        del self._entries[:]
+        with cython.critical_section(self._entries):
+            self._first_error = None
+            self.last_error = None
+            self._offset = 0
+            del self._entries[:]
 
     cpdef copy(self):
         """Creates a shallow copy of this error log and the list of entries.
         """
-        return _ListErrorLog(
-            self._entries[self._offset:],
-            self._first_error, self.last_error)
+        with cython.critical_section(self._entries):
+            entries = self._entries[self._offset:]
+            first_error = self._first_error
+            last_error = self.last_error
+
+        return _ListErrorLog(entries, first_error, last_error)
 
     def __iter__(self):
-        return iter(self._entries[self._offset:])
+        with cython.critical_section(self._entries):
+            entries = self._entries[self._offset:]
+        return iter(entries)
 
     cpdef receive(self, _LogEntry entry):
-        if self._first_error is None and entry.level >= xmlerror.XML_ERR_ERROR:
-            self._first_error = entry
-        self._entries.append(entry)
+        with cython.critical_section(self._entries):
+            if self._first_error is None and entry.level >= xmlerror.XML_ERR_ERROR:
+                self._first_error = entry
+            self._entries.append(entry)
 
 cdef class _DomainErrorLog(_ErrorLog):
     def __init__(self, domains):
@@ -498,16 +509,17 @@ cdef class _RotatingErrorLog(_ErrorLog):
         self._max_len = max_len
 
     cpdef receive(self, _LogEntry entry):
-        if self._first_error is None and entry.level >= xmlerror.XML_ERR_ERROR:
-            self._first_error = entry
-        self._entries.append(entry)
+        with cython.critical_section(self._entries):
+            if self._first_error is None and entry.level >= xmlerror.XML_ERR_ERROR:
+                self._first_error = entry
+            self._entries.append(entry)
 
-        if len(self._entries) > self._max_len:
-            self._offset += 1
-            if self._offset > self._max_len // 3:
-                offset = self._offset
-                self._offset = 0
-                del self._entries[:offset]
+            if len(self._entries) > self._max_len:
+                self._offset += 1
+                if self._offset > self._max_len // 3:
+                    offset = self._offset
+                    self._offset = 0
+                    del self._entries[:offset]
 
 cdef class PyErrorLog(_BaseErrorLog):
     """PyErrorLog(self, logger_name=None, logger=None)
@@ -697,14 +709,14 @@ cdef void _connectGenericErrorLog(log, int c_domain=-1) noexcept:
 
 
 cdef void _receiveGenericError(void* c_log_handler, int c_domain,
-                               char* msg, cvarargs.va_list args) noexcept nogil:
+                               const char* msg, cvarargs.va_list args) noexcept nogil:
     # no Python objects here, may be called without thread context !
     cdef xmlerror.xmlError c_error
     cdef char* c_text
     cdef char* c_message
-    cdef char* c_element
-    cdef char* c_pos
-    cdef char* c_name_pos
+    cdef const char* c_element
+    cdef const char* c_pos
+    cdef const char* c_name_pos
     cdef char* c_str
     cdef int text_size, element_size, format_count, c_int
     if not __DEBUG or msg is NULL:

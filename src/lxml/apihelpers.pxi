@@ -45,9 +45,9 @@ cdef _Document _documentOrRaise(object input):
     elif isinstance(input, _Document):
         doc = <_Document>input
     else:
-        raise TypeError, f"Invalid input object: {python._fqtypename(input).decode('utf8')}"
+        raise TypeError, f"Invalid input object: {python._fqtypename(input)}"
     if doc is None:
-        raise ValueError, f"Input object has no document: {python._fqtypename(input).decode('utf8')}"
+        raise ValueError, f"Input object has no document: {python._fqtypename(input)}"
     _assertValidDoc(doc)
     return doc
 
@@ -65,10 +65,10 @@ cdef _Element _rootNodeOrRaise(object input):
     elif isinstance(input, _Document):
         node = (<_Document>input).getroot()
     else:
-        raise TypeError, f"Invalid input object: {python._fqtypename(input).decode('utf8')}"
+        raise TypeError, f"Invalid input object: {python._fqtypename(input)}"
     if (node is None or not node._c_node or
             node._c_node.type != tree.XML_ELEMENT_NODE):
-        raise ValueError, f"Input object is not an XML element: {python._fqtypename(input).decode('utf8')}"
+        raise ValueError, f"Input object is not an XML element: {python._fqtypename(input)}"
     _assertValidNode(node)
     return node
 
@@ -79,9 +79,9 @@ cdef bint _isAncestorOrSame(xmlNode* c_ancestor, xmlNode* c_node) noexcept:
         c_node = c_node.parent
     return False
 
-cdef _Element _makeElement(tag, xmlDoc* c_doc, _Document doc,
-                           _BaseParser parser, text, tail, attrib, nsmap,
-                           dict extra_attrs):
+
+cdef _Element _makeElement(tag, xmlDoc* c_doc, _Document doc, _BaseParser parser=None,
+                           text=None, tail=None, attrib=None, nsmap=None, dict extra_attrs=None):
     """Create a new element and initialize text content, namespaces and
     attributes.
 
@@ -96,11 +96,17 @@ cdef _Element _makeElement(tag, xmlDoc* c_doc, _Document doc,
 
     If 'c_doc' is also NULL, a new xmlDoc will be created.
     """
-    cdef xmlNode* c_node
+    cdef bint is_html = False
+    cdef bint is_new_doc = doc is None
+
     if doc is not None:
         c_doc = doc._c_doc
+        is_html = doc.ishtml()
+    elif parser is not None:
+        is_html = parser._flags.for_html
+
     ns_utf, name_utf = _getNsTag(tag)
-    if parser is not None and parser._for_html:
+    if is_html:
         _htmlTagValidOrRaise(name_utf)
         if c_doc is NULL:
             c_doc = _newHTMLDoc()
@@ -108,34 +114,37 @@ cdef _Element _makeElement(tag, xmlDoc* c_doc, _Document doc,
         _tagValidOrRaise(name_utf)
         if c_doc is NULL:
             c_doc = _newXMLDoc()
-    c_node = _createElement(c_doc, name_utf)
+
+    if doc is None:
+        doc = _documentFactory(c_doc, parser)
+    if is_new_doc:
+        doc.initDict()
+
+    cdef xmlNode* c_node = _createElement(c_doc, name_utf)
     if c_node is NULL:
-        if doc is None and c_doc is not NULL:
-            tree.xmlFreeDoc(c_doc)
         raise MemoryError()
+    if is_new_doc:
+        tree.xmlDocSetRootElement(c_doc, c_node)
+
     try:
-        if doc is None:
-            tree.xmlDocSetRootElement(c_doc, c_node)
-            doc = _documentFactory(c_doc, parser)
+        # add namespaces to node if necessary
+        _setNodeNamespaces(c_node, doc, ns_utf, nsmap)
+
         if text is not None:
             _setNodeText(c_node, text)
         if tail is not None:
             _setTailText(c_node, tail)
-        # add namespaces to node if necessary
-        _setNodeNamespaces(c_node, doc, ns_utf, nsmap)
+
         _initNodeAttributes(c_node, doc, attrib, extra_attrs)
-        return _elementFactory(doc, c_node)
     except:
-        # free allocated c_node/c_doc unless Python does it for us
-        if c_node.doc is not c_doc:
-            # node not yet in document => will not be freed by document
-            if tail is not None:
-                _removeText(c_node.next) # tail
-            tree.xmlFreeNode(c_node)
-        if doc is None:
-            # c_doc will not be freed by doc
-            tree.xmlFreeDoc(c_doc)
+        if not is_new_doc:
+            # Not in the document yet, need to free it explicitly.
+            tree.xmlFreeNodeList(c_node)
+            c_node = NULL
         raise
+
+    return _elementFactory(doc, c_node)
+
 
 cdef int _initNewElement(_Element element, bint is_html, name_utf, ns_utf,
                          _BaseParser parser, attrib, nsmap, dict extra_attrs) except -1:
@@ -153,13 +162,14 @@ cdef int _initNewElement(_Element element, bint is_html, name_utf, ns_utf,
     else:
         _tagValidOrRaise(name_utf)
         c_doc = _newXMLDoc()
+
+    doc = _documentFactory(c_doc, parser)
+    doc.initDict()
+
     c_node = _createElement(c_doc, name_utf)
     if c_node is NULL:
-        if c_doc is not NULL:
-            tree.xmlFreeDoc(c_doc)
         raise MemoryError()
     tree.xmlDocSetRootElement(c_doc, c_node)
-    doc = _documentFactory(c_doc, parser)
     # add namespaces to node if necessary
     _setNodeNamespaces(c_node, doc, ns_utf, nsmap)
     _initNodeAttributes(c_node, doc, attrib, extra_attrs)
@@ -167,8 +177,9 @@ cdef int _initNewElement(_Element element, bint is_html, name_utf, ns_utf,
     element._init()
     return 0
 
-cdef _Element _makeSubElement(_Element parent, tag, text, tail,
-                              attrib, nsmap, dict extra_attrs):
+
+cdef _Element _makeSubElement(_Element parent, tag, text=None, tail=None,
+                              attrib=None, nsmap=None, dict extra_attrs=None):
     """Create a new child element and initialize text content, namespaces and
     attributes.
     """
@@ -180,7 +191,7 @@ cdef _Element _makeSubElement(_Element parent, tag, text, tail,
     ns_utf, name_utf = _getNsTag(tag)
     c_doc = parent._doc._c_doc
 
-    if parent._doc._parser is not None and parent._doc._parser._for_html:
+    if parent._doc.ishtml():
         _htmlTagValidOrRaise(name_utf)
     else:
         _tagValidOrRaise(name_utf)
@@ -231,7 +242,7 @@ cdef int _setNodeNamespaces(xmlNode* c_node, _Document doc,
             c_ns = tree.xmlSearchNs(doc._c_doc, c_node, c_prefix)
             if c_ns is NULL or \
                     c_ns.href is NULL or \
-                    tree.xmlStrcmp(c_ns.href, c_href) != 0:
+                    not tree.xmlStrEqual(c_ns.href, c_href):
                 c_ns = tree.xmlNewNs(c_node, c_href, c_prefix)
                 if c_ns is NULL:
                     # libxml2 has two error conditions: "out of memory" and "prefix exists already".
@@ -242,7 +253,7 @@ cdef int _setNodeNamespaces(xmlNode* c_node, _Document doc,
                         if c_prefix is NULL:
                             if c_ns.prefix is NULL:
                                 break
-                        elif tree.xmlStrcmp(c_ns.prefix, c_prefix) == 0:
+                        elif tree.xmlStrEqual(c_ns.prefix, c_prefix):
                             break
                         c_ns = c_ns.next
                     else:
@@ -325,15 +336,19 @@ cdef _initNodeAttributes(xmlNode* c_node, _Document doc, attrib, dict extra):
     cdef bint is_html
     cdef xmlNs* c_ns
     if attrib is not None and not hasattr(attrib, 'items'):
-        raise TypeError, f"Invalid attribute dictionary: {python._fqtypename(attrib).decode('utf8')}"
-    if not attrib and not extra:
+        raise TypeError, f"Invalid attribute dictionary: {python._fqtypename(attrib)}"
+
+    has_attrib = bool(attrib)
+    has_extra = bool(extra)
+    if not has_attrib and not has_extra:
         return  # nothing to do
-    is_html = doc._parser._for_html
+
+    is_html = doc.ishtml()
     seen = set()
-    if extra:
+    if has_extra:
         for name, value in extra.items():
             _addAttributeToNode(c_node, doc, is_html, name, value, seen)
-    if attrib:
+    if has_attrib:
         for name, value in _iter_attrib(attrib):
             _addAttributeToNode(c_node, doc, is_html, name, value, seen)
 
@@ -471,7 +486,7 @@ cdef xmlNs* _searchNsByHref(xmlNode* c_node, const_xmlChar* c_href, bint is_attr
     cdef xmlNode* c_element
     if c_href is NULL or c_node is NULL or c_node.type == tree.XML_ENTITY_REF_NODE:
         return NULL
-    if tree.xmlStrcmp(c_href, tree.XML_XML_NAMESPACE) == 0:
+    if tree.xmlStrEqual(c_href, tree.XML_XML_NAMESPACE):
         # no special cases here, let libxml2 handle this
         return tree.xmlSearchNsByHref(c_node.doc, c_node, c_href)
     if c_node.type == tree.XML_ATTRIBUTE_NODE:
@@ -483,7 +498,7 @@ cdef xmlNs* _searchNsByHref(xmlNode* c_node, const_xmlChar* c_href, bint is_attr
         if c_node.type == tree.XML_ELEMENT_NODE:
             c_ns = c_node.nsDef
             while c_ns is not NULL:
-                if c_ns.href is not NULL and tree.xmlStrcmp(c_href, c_ns.href) == 0:
+                if c_ns.href is not NULL and tree.xmlStrEqual(c_href, c_ns.href):
                     if c_ns.prefix is NULL and is_attribute:
                         # for attributes, continue searching a named
                         # prefix, but keep the first default namespace
@@ -498,7 +513,7 @@ cdef xmlNs* _searchNsByHref(xmlNode* c_node, const_xmlChar* c_href, bint is_attr
             if c_node is not c_element and c_node.ns is not NULL:
                 # optimise: the node may have the namespace itself
                 c_ns = c_node.ns
-                if c_ns.href is not NULL and tree.xmlStrcmp(c_href, c_ns.href) == 0:
+                if c_ns.href is not NULL and tree.xmlStrEqual(c_href, c_ns.href):
                     if c_ns.prefix is NULL and is_attribute:
                         # for attributes, continue searching a named
                         # prefix, but keep the first default namespace
@@ -596,7 +611,7 @@ cdef int _setAttributeValue(_Element element, key, value) except -1:
     cdef const_xmlChar* c_value
     cdef xmlNs* c_ns
     ns, tag = _getNsTag(key)
-    is_html = element._doc._parser._for_html
+    is_html = element._doc.ishtml()
     if not is_html:
         _attributeValidOrRaise(tag)
     c_tag = _xcstr(tag)
@@ -638,8 +653,7 @@ cdef list _collectAttributes(xmlNode* c_node, int collecttype):
     c_attr = c_node.properties
     count = 0
     while c_attr is not NULL:
-        if c_attr.type == tree.XML_ATTRIBUTE_NODE:
-            count += 1
+        count +=  (c_attr.type == tree.XML_ATTRIBUTE_NODE)
         c_attr = c_attr.next
 
     if not count:
@@ -746,7 +760,7 @@ cdef xmlNode* _createTextNode(xmlDoc* doc, value) except NULL:
     if isinstance(value, CDATA):
         c_text_node = tree.xmlNewCDataBlock(
             doc, _xcstr((<CDATA>value)._utf8_data),
-            python.PyBytes_GET_SIZE((<CDATA>value)._utf8_data))
+            len((<CDATA>value)._utf8_data))
     else:
         text = _utf8(value)
         c_text_node = tree.xmlNewDocText(doc, _xcstr(text))
@@ -814,10 +828,13 @@ cdef int _findChildSlice(
     if childcount == 0:
         c_start_node[0] = NULL
         c_length[0] = 0
-        if sliceobject.step is None:
+        step = sliceobject.step
+        if step is None:
             c_step[0] = 1
+        elif python.PyIndex_Check(step):
+            c_step[0] = <Py_ssize_t> step
         else:
-            python._PyEval_SliceIndex(sliceobject.step, c_step)
+            raise TypeError("slice indices must be integers or None or have an __index__ method")
         return 0
 
     python.PySlice_GetIndicesEx(
@@ -833,18 +850,18 @@ cdef int _findChildSlice(
 cdef bint _isFullSlice(slice sliceobject) except -1:
     """Conservative guess if this slice is a full slice as in ``s[:]``.
     """
-    cdef Py_ssize_t step = 0
+    cdef Py_ssize_t c_step = 0
     if sliceobject is None:
-        return 0
-    if sliceobject.start is None and \
-            sliceobject.stop is None:
-        if sliceobject.step is None:
-            return 1
-        python._PyEval_SliceIndex(sliceobject.step, &step)
-        if step == 1:
-            return 1
-        return 0
-    return 0
+        return False
+    if sliceobject.start is None and sliceobject.stop is None:
+        step = sliceobject.step
+        if step is None:
+            return True
+        elif python.PyIndex_Check(step):
+            return 1 == <Py_ssize_t> step
+        else:
+            raise TypeError("slice indices must be integers or None or have an __index__ method")
+    return False
 
 cdef _collectChildren(_Element element):
     cdef xmlNode* c_node
@@ -974,17 +991,17 @@ cdef inline bint _tagMatches(xmlNode* c_node, const_xmlChar* c_href, const_xmlCh
             if c_node_href is NULL:
                 return c_href[0] == c'\0'
             else:
-                return tree.xmlStrcmp(c_node_href, c_href) == 0
+                return tree.xmlStrEqual(c_node_href, c_href)
     elif c_href is NULL:
         if _getNs(c_node) is not NULL:
             return 0
-        return c_node.name == c_name or tree.xmlStrcmp(c_node.name, c_name) == 0
-    elif c_node.name == c_name or tree.xmlStrcmp(c_node.name, c_name) == 0:
+        return tree.xmlStrEqual(c_node.name, c_name)
+    elif tree.xmlStrEqual(c_node.name, c_name):
         c_node_href = _getNs(c_node)
         if c_node_href is NULL:
             return c_href[0] == c'\0'
         else:
-            return tree.xmlStrcmp(c_node_href, c_href) == 0
+            return tree.xmlStrEqual(c_node_href, c_href)
     else:
         return 0
 
@@ -1028,7 +1045,7 @@ cdef inline bint _nsTagMatchesExactly(const_xmlChar* c_node_href,
     * c_name is NULL
     * its name string points to the same address (!) as c_name
     """
-    cdef char* c_href
+    cdef const char* c_href
     if c_qname.c_name is not NULL and c_qname.c_name is not c_node_name:
         return 0
     if c_qname.href is NULL:
@@ -1039,7 +1056,7 @@ cdef inline bint _nsTagMatchesExactly(const_xmlChar* c_node_href,
     elif c_node_href is NULL:
         return 0
     else:
-        return tree.xmlStrcmp(<const_xmlChar*>c_href, c_node_href) == 0
+        return tree.xmlStrEqual(<const_xmlChar*>c_href, c_node_href)
 
 cdef Py_ssize_t _mapTagsToQnameMatchArray(xmlDoc* c_doc, list ns_tags,
                                           qname* c_ns_tags, bint force_into_dict) except -1:
@@ -1212,17 +1229,16 @@ cdef int _replaceSlice(_Element parent, xmlNode* c_node,
 
     ``c_node`` may be NULL to indicate the end of the children list.
     """
+    # 'parent._doc' is assumed to be locked or otherwise safe to modify.
+    # The documents of the inserted elements will be locked on use.
     cdef xmlNode* c_orig_neighbour
     cdef xmlNode* c_next
     cdef xmlDoc*  c_source_doc
     cdef _Element element
+    cdef _Document doc
     cdef Py_ssize_t seqlength, i, c
     cdef _node_to_node_function next_element
     assert step > 0, step
-    if left_to_right:
-        next_element = _nextElement
-    else:
-        next_element = _previousElement
 
     if not isinstance(elements, (list, tuple)):
         elements = list(elements)
@@ -1236,22 +1252,35 @@ cdef int _replaceSlice(_Element parent, xmlNode* c_node,
 
     if c_node is NULL:
         # no children yet => add all elements straight away
-        if left_to_right:
+        add_child = _appendChild if left_to_right else _prependChild
+        doc = None
+        try:
             for element in elements:
-                assert element is not None, "Node must not be None"
-                _appendChild(parent, element)
-        else:
-            for element in elements:
-                assert element is not None, "Node must not be None"
-                _prependChild(parent, element)
+                if element is None:
+                    raise ValueError("Element must not be None")
+                _assertValidNode(element)
+
+                if doc is not element._doc and doc is not parent._doc:
+                    if doc is not None:
+                        doc.unlock_write()
+                    doc = element._doc
+                    doc.lock_write()
+
+                add_child(parent, element)
+
+        finally:
+            if doc is not None:
+                doc.unlock_write()
         return 0
 
     # remove the elements first as some might be re-added
     if left_to_right:
         # L->R, remember left neighbour
+        next_element = _nextElement
         c_orig_neighbour = _previousElement(c_node)
     else:
         # R->L, remember right neighbour
+        next_element = _previousElement
         c_orig_neighbour = _nextElement(c_node)
 
     # We remove the original slice elements one by one. Since we hold
@@ -1282,17 +1311,31 @@ cdef int _replaceSlice(_Element parent, xmlNode* c_node,
     elif c_orig_neighbour is NULL:
         # at the end, but reversed stepping
         # append one element and go to the next insertion point
-        for element in elements:
-            assert element is not None, "Node must not be None"
-            _appendChild(parent, element)
-            c_node = element._c_node
-            if slicelength > 0:
-                slicelength -= 1
-                for i in range(1, step):
-                    c_node = next_element(c_node)
-                    if c_node is NULL:
-                        break
-            break
+        doc = None
+        try:
+            for element in elements:
+                if element is None:
+                    raise ValueError("Element must not be None")
+                _assertValidNode(element)
+
+                if doc is not element._doc and doc is not parent._doc:
+                    if doc is not None:
+                        doc.unlock_write()
+                    doc = element._doc
+                    doc.lock_write()
+
+                _appendChild(parent, element)
+                c_node = element._c_node
+                if slicelength > 0:
+                    slicelength -= 1
+                    for i in range(1, step):
+                        c_node = next_element(c_node)
+                        if c_node is NULL:
+                            break
+                break
+        finally:
+            if doc is not None:
+                doc.unlock_write()
     else:
         c_node = c_orig_neighbour
 
@@ -1303,42 +1346,64 @@ cdef int _replaceSlice(_Element parent, xmlNode* c_node,
 
     # now insert elements where we removed them
     if c_node is not NULL:
-        for element in elements:
-            assert element is not None, "Node must not be None"
-            _assertValidNode(element)
-            # move element and tail over
-            c_source_doc = element._c_node.doc
-            c_next = element._c_node.next
-            tree.xmlAddPrevSibling(c_node, element._c_node)
-            _moveTail(c_next, element._c_node)
+        doc = None
+        try:
+            for element in elements:
+                if element is None:
+                    raise ValueError("Element must not be None")
+                _assertValidNode(element)
 
-            # integrate element into new document
-            moveNodeToDocument(parent._doc, c_source_doc, element._c_node)
+                if doc is not element._doc and doc is not parent._doc:
+                    if doc is not None:
+                        doc.unlock_write()
+                    doc = element._doc
+                    doc.lock_write()
 
-            # stop at the end of the slice
-            if slicelength > 0:
-                slicelength -= 1
-                for i in range(step):
-                    c_node = next_element(c_node)
+                # move element and tail over
+                c_source_doc = element._c_node.doc
+                c_next = element._c_node.next
+                tree.xmlAddPrevSibling(c_node, element._c_node)
+                _moveTail(c_next, element._c_node)
+
+                # integrate element into new document
+                moveNodeToDocument(parent._doc, c_source_doc, element._c_node)
+
+                # stop at the end of the slice
+                if slicelength > 0:
+                    slicelength -= 1
+                    for i in range(step):
+                        c_node = next_element(c_node)
+                        if c_node is NULL:
+                            break
                     if c_node is NULL:
                         break
-                if c_node is NULL:
-                    break
-        else:
-            # everything inserted
-            return 0
+            else:
+                # everything inserted
+                return 0
+        finally:
+            if doc is not None:
+                doc.unlock_write()
 
     # append the remaining elements at the respective end
-    if left_to_right:
+    add_child = _appendChild if left_to_right else _prependChild
+    doc = None
+    try:
         for element in elements:
-            assert element is not None, "Node must not be None"
+            if element is None:
+                raise ValueError("Element must not be None")
             _assertValidNode(element)
-            _appendChild(parent, element)
-    else:
-        for element in elements:
-            assert element is not None, "Node must not be None"
-            _assertValidNode(element)
-            _prependChild(parent, element)
+
+            if doc is not element._doc and doc is not parent._doc:
+                if doc is not None:
+                    doc.unlock_write()
+                doc = element._doc
+                doc.lock_write()
+
+            add_child(parent, element)
+
+    finally:
+        if doc is not None:
+            doc.unlock_write()
 
     return 0
 
@@ -1618,7 +1683,7 @@ cdef object _encodeFilename(object filename):
 cdef object _decodeFilename(const_xmlChar* c_path):
     """Make the filename a unicode string if we are in Py3.
     """
-    return _decodeFilenameWithLength(c_path, tree.xmlStrlen(c_path))
+    return _decodeFilenameWithLength(c_path, cstring_h.strlen(<const char*> c_path))
 
 cdef object _decodeFilenameWithLength(const_xmlChar* c_path, size_t c_len):
     """Make the filename a unicode string if we are in Py3.
@@ -1639,7 +1704,7 @@ cdef object _encodeFilenameUTF8(object filename):
     """Recode filename as UTF-8. Tries ASCII, local filesystem encoding and
     UTF-8 as source encoding.
     """
-    cdef char* c_filename
+    cdef const char* c_filename
     if filename is None:
         return None
     elif isinstance(filename, bytes):
@@ -1678,33 +1743,33 @@ cdef tuple _getNsTagWithEmptyNs(tag):
     return __getNsTag(tag, 1)
 
 cdef tuple __getNsTag(tag, bint empty_ns):
-    cdef char* c_tag
-    cdef char* c_ns_end
+    cdef const char* c_tag
+    cdef const char* c_ns_end
     cdef Py_ssize_t taglen
     cdef Py_ssize_t nslen
     cdef bytes ns = None
     # _isString() is much faster than isinstance()
     if not _isString(tag) and isinstance(tag, QName):
         tag = (<QName>tag).text
-    tag = _utf8(tag)
-    c_tag = _cstr(tag)
+    tag_utf8: bytes = _utf8(tag)
+    c_tag = _cstr(tag_utf8)
     if c_tag[0] == c'{':
         c_tag += 1
         c_ns_end = cstring_h.strchr(c_tag, c'}')
         if c_ns_end is NULL:
             raise ValueError, "Invalid tag name"
         nslen  = c_ns_end - c_tag
-        taglen = python.PyBytes_GET_SIZE(tag) - nslen - 2
+        taglen = len(tag_utf8) - nslen - 2
         if taglen == 0:
             raise ValueError, "Empty tag name"
         if nslen > 0:
             ns = <bytes>c_tag[:nslen]
         elif empty_ns:
             ns = b''
-        tag = <bytes>c_ns_end[1:taglen+1]
-    elif python.PyBytes_GET_SIZE(tag) == 0:
+        tag_utf8 = <bytes>c_ns_end[1:taglen+1]
+    elif len(tag_utf8) == 0:
         raise ValueError, "Empty tag name"
-    return ns, tag
+    return ns, tag_utf8
 
 cdef inline int _pyXmlNameIsValid(name_utf8):
     return _xmlNameIsValid(_xcstr(name_utf8)) and b':' not in name_utf8

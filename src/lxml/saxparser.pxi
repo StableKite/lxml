@@ -73,7 +73,6 @@ cdef class _SaxParserTarget:
 
 #@cython.final
 @cython.internal
-@cython.no_gc_clear  # Required because parent class uses it - Cython bug.
 cdef class _SaxParserContext(_ParserContext):
     """This class maps SAX2 events to parser target events.
     """
@@ -706,8 +705,8 @@ cdef inline xmlNode* _findLastEventNode(xmlparser.xmlParserCtxt* c_ctxt) noexcep
 ############################################################
 
 cdef class TreeBuilder(_SaxParserTarget):
-    """TreeBuilder(self, element_factory=None, parser=None,
-                    comment_factory=None, pi_factory=None,
+    """TreeBuilder(self, element_factory=None, parser=None, \
+                    comment_factory=None, pi_factory=None, \
                     insert_comments=True, insert_pis=True)
 
     Parser target that builds a tree from parse event callbacks.
@@ -775,10 +774,13 @@ cdef class TreeBuilder(_SaxParserTarget):
                 _appendChild(self._element_stack[-1], self._last)
         elif self._element_stack:
             self._last = _makeSubElement(
-                self._element_stack[-1], tag, None, None, attrib, nsmap, None)
+                self._element_stack[-1], tag,
+                text=None, tail=None, attrib=attrib, nsmap=nsmap)
         else:
             self._last = _makeElement(
-                tag, NULL, None, self._parser, None, None, attrib, nsmap, None)
+                tag, NULL,
+                doc=None, parser=self._parser,
+                text=None, tail=None, attrib=attrib, nsmap=nsmap)
         self._element_stack.append(self._last)
         self._in_tail = 0
         return self._last

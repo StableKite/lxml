@@ -10,7 +10,7 @@ Build-Depends: debhelper-compat (= 11),
   python3-bs4,
   python3-cssselect,
   python3-html5lib,
-  cython3,
+  cython3 (>= 3.3.0),
   python3-sphinx-autoapi,
 X-Python-Version: all
 Standards-Version: 4.7.4

@@ -21,7 +21,11 @@ cdef class ObjectPath:
     cdef object _path_str
     cdef _ObjectPath*  _c_path
     cdef Py_ssize_t _path_len
+
     def __init__(self, path):
+        if self._c_path is not NULL:
+            raise RuntimeError("Repeated call to ObjectPath.__init__()")
+
         if python._isString(path):
             self._path = _parse_object_path_string(path)
             self._path_str = path
@@ -52,14 +56,25 @@ cdef class ObjectPath:
             default = _default[0]
         else:
             default = _NO_DEFAULT
-        return _find_object_path(root, self._c_path, self._path_len, default)
+
+        doc = root._doc
+        cetree.lock_read(doc)
+        try:
+            return _find_object_path(root, self._c_path, self._path_len, default)
+        finally:
+            cetree.unlock_read(doc)
 
     def hasattr(self, _Element root not None):
         "hasattr(self, root)"
+        doc = root._doc
+        cetree.lock_read(doc)
         try:
             _find_object_path(root, self._c_path, self._path_len, _NO_DEFAULT)
         except AttributeError:
             return False
+        finally:
+            cetree.unlock_read(doc)
+
         return True
 
     def setattr(self, _Element root not None, value):
@@ -69,7 +84,12 @@ cdef class ObjectPath:
 
         If any of the children on the path does not exist, it is created.
         """
-        _create_object_path(root, self._c_path, self._path_len, 1, value)
+        doc = root._doc
+        cetree.lock_write(doc)
+        try:
+            _create_object_path(root, self._c_path, self._path_len, 1, value)
+        finally:
+            cetree.unlock_write(doc)
 
     def addattr(self, _Element root not None, value):
         """addattr(self, root, value)
@@ -78,7 +98,12 @@ cdef class ObjectPath:
 
         If any of the children on the path does not exist, it is created.
         """
-        _create_object_path(root, self._c_path, self._path_len, 0, value)
+        doc = root._doc
+        cetree.lock_write(doc)
+        try:
+            _create_object_path(root, self._c_path, self._path_len, 0, value)
+        finally:
+            cetree.unlock_write(doc)
 
 
 cdef object __MATCH_PATH_SEGMENT = re.compile(
@@ -143,12 +168,12 @@ cdef list _parse_object_path_list(path):
             index = 0
         else:
             ns, name = cetree.getNsTag(item)
-            c_name = _xcstr(name)
-            index_pos = tree.xmlStrchr(c_name, c'[')
+            c_name = python._cstr(name)
+            index_pos = cstring_h.strchr(c_name, c'[')
             if index_pos is NULL:
                 index = 0
             else:
-                index_end = tree.xmlStrchr(index_pos + 1, c']')
+                index_end = cstring_h.strchr(index_pos + 1, c']')
                 if index_end is NULL:
                     raise ValueError, "index must be enclosed in []"
                 index = int(index_pos[1:index_end - index_pos])

@@ -18,6 +18,7 @@ from .common_imports import (
 class _IOTestCaseBase(HelperTestCase):
     """(c)ElementTree compatibility for IO functions/methods
     """
+    __test__ = False
     etree = None
 
     def setUp(self):
@@ -331,6 +332,7 @@ class _IOTestCaseBase(HelperTestCase):
 
 
 class ETreeIOTestCase(_IOTestCaseBase):
+    __test__ = True
     etree = etree
 
     @needs_feature('zlib')
@@ -400,6 +402,7 @@ class ETreeIOTestCase(_IOTestCaseBase):
 
 if ElementTree:
     class ElementTreeIOTestCase(_IOTestCaseBase):
+        __test__ = True
         etree = ElementTree
 
 
@@ -409,6 +412,10 @@ def test_suite():
     if ElementTree:
         suite.addTests([unittest.defaultTestLoader.loadTestsFromTestCase(ElementTreeIOTestCase)])
     return suite
+
+
+# Hide test base classes from test discovery.
+del _IOTestCaseBase
 
 
 if __name__ == '__main__':

@@ -12,6 +12,7 @@ import os.path
 import unittest
 import contextlib
 import copy
+import itertools
 import sys
 import re
 import gc
@@ -23,7 +24,7 @@ import textwrap
 import zlib
 import gzip
 
-from .common_imports import etree, HelperTestCase, needs_feature
+from .common_imports import etree, HelperTestCase, needs_feature, IS_PYPY
 from .common_imports import fileInTestDir, fileUrlInTestDir, read_file, path2url, tmpfile
 from .common_imports import SillyFileLike, LargeFileLikeUnicode, doctest, make_doctest
 from .common_imports import canonicalize, _str, _bytes
@@ -44,6 +45,7 @@ TESTED VERSION: {etree.__version__}
     Default encoding: {sys.getdefaultencoding()}
     Max Unicode:      {sys.maxunicode}
     PyUCS4 encoding:  {getattr(etree, '_pyucs4_encoding_name', '')}
+    freethreading:    {getattr(etree, '_freethreading_enabled', '')}
 """)
 
 
@@ -598,13 +600,18 @@ class ETreeOnlyTestCase(HelperTestCase):
     def test_pi(self):
         # lxml.etree separates target and text
         Element = self.etree.Element
-        SubElement = self.etree.SubElement
         ProcessingInstruction = self.etree.ProcessingInstruction
 
         a = Element('a')
         a.append(ProcessingInstruction('foo', 'some more text'))
         self.assertEqual(a[0].target, 'foo')
         self.assertEqual(a[0].text, 'some more text')
+
+    def test_pi_content(self):
+        ProcessingInstruction = self.etree.ProcessingInstruction
+        self.assertRaises(ValueError, ProcessingInstruction, "piname", "xyz?>zyx")
+        pi = ProcessingInstruction('abc', 'def')
+        self.assertRaises(ValueError, setattr, pi, 'text', "xyz?>zyx")
 
     def test_pi_parse(self):
         XML = self.etree.XML
@@ -723,6 +730,14 @@ class ETreeOnlyTestCase(HelperTestCase):
         parse = self.etree.parse
         self.assertRaises(TypeError, parse, 'notthere.xml', object())
 
+    def test_parse_huge_tree(self):
+        fromstring = self.etree.fromstring
+        XMLParser = self.etree.XMLParser
+
+        xml = b'<a><b></b><c/></a>'
+        parser = XMLParser(huge_tree=True)
+        self.assertEqual(2, len(fromstring(xml, parser=parser)))
+
     def test_parse_premature_end(self):
         fromstring = self.etree.fromstring
         XMLParser = self.etree.XMLParser
@@ -740,6 +755,21 @@ class ETreeOnlyTestCase(HelperTestCase):
         parser = XMLParser(target=etree.TreeBuilder())
         self.assertRaises(self.etree.XMLSyntaxError, fromstring, xml, parser)
 
+    @unittest.skipIf(IS_PYPY, "currently crashes PyPy")
+    def test_parser_reentry_from_target(self):
+        fromstring = self.etree.fromstring
+        XMLParser = self.etree.XMLParser
+
+        class Target:
+            def start(self, tag, attrib):
+                etree.fromstring(b"<root />", parser=parser)
+            def close(self):
+                pass
+
+        xml = b'<a><b></b>'
+        parser = XMLParser(target=Target())
+        self.assertRaises(RuntimeError, fromstring, xml, parser)
+
     def test_iterparse_getiterator(self):
         iterparse = self.etree.iterparse
         f = BytesIO(b'<a><b><d/></b><c/></a>')
@@ -749,6 +779,17 @@ class ETreeOnlyTestCase(HelperTestCase):
             counts.append(len(list(elem.getiterator())))
         self.assertEqual(
             [1,2,1,4],
+            counts)
+
+    def test_iterparse_huge_tree(self):
+        iterparse = self.etree.iterparse
+        f = BytesIO(b'<a><b><d/></b><c/></a>')
+
+        counts = []
+        for _, elem in iterparse(f, huge_tree=True):
+            counts.append(len(elem))
+        self.assertEqual(
+            [0,1,0,2],
             counts)
 
     def test_iterparse_tree_comments(self):
@@ -2373,6 +2414,16 @@ class ETreeOnlyTestCase(HelperTestCase):
         values.sort()
         self.assertEqual(['Alpha', 'Beta', 'Gamma'], values)
 
+    def test_comment_content(self):
+        Comment = self.etree.Comment
+        self.assertRaises(ValueError, Comment, "--")
+        self.assertRaises(ValueError, Comment, "  --  ")
+        self.assertRaises(ValueError, Comment, "xyz-")
+        comment = Comment('abc')
+        self.assertRaises(ValueError, setattr, comment, 'text', "--")
+        self.assertRaises(ValueError, setattr, comment, 'text', "  --  ")
+        self.assertRaises(ValueError, setattr, comment, 'text', "xyz-")
+
     # gives error in ElementTree
     def test_comment_empty(self):
         Element = self.etree.Element
@@ -2990,6 +3041,22 @@ class ETreeOnlyTestCase(HelperTestCase):
                           sorted(expected.items()))
         self.assertEqual(sorted(dic.keys()),
                           sorted(expected.keys()))
+
+    def test_XMLDTDID_target_None(self):
+        # Crash reported in https://bugs.launchpad.net/bugs/2164984
+        class Target:
+            def start(self, tag, attrs): pass
+            def end(self, tag): pass
+            def data(self, data): pass
+            def close(self): return None  # not an Element !
+
+        parser = etree.XMLParser(target=Target())
+        try:
+            result = etree.XMLDTDID(b"<root/>", parser=parser)
+        except TypeError:
+            self.assertTrue(True)
+        else:
+            self.fail(f"Should have raised TypeError but returned {result}")
 
     def test_register_namespace_xml(self):
         self.assertRaises(ValueError, self.etree.register_namespace,
@@ -3938,6 +4005,24 @@ class ETreeOnlyTestCase(HelperTestCase):
         self.assertRaises(SyntaxError, root.findall, '')
         self.assertRaises(SyntaxError, root.findall, '//')  # absolute path on Element
         self.assertRaises(SyntaxError, root.findall, './//')
+
+    def test_iterfind_tree_modifications(self):
+        def insert_prev(it, tag='tagname'):
+            for element in it:
+                yield element
+                element.addprevious(element.makeelement(tag))
+
+        tostring = self.etree.tostring
+        root = self.etree.XML('<root><a>A</a><b>B</b><c>C</c></root>')
+        it = root.iterfind('./*')
+        tags = [element.tag for element in itertools.islice(insert_prev(it, tag='x'), 4)]
+        self.assertEqual(tostring(root), b'<root><x/><a>A</a><x/><b>B</b><x/><c>C</c></root>')
+        self.assertListEqual(tags, ['a', 'b', 'c'])
+
+        root = self.etree.XML('<root><a>A</a><b>B</b><c>C</c></root>')
+        it = root.iterfind('./b[1]')
+        tags = [element.tag for element in insert_prev(it, tag='b')]
+        self.assertListEqual(tags, ['b'])
 
     def test_index(self):
         etree = self.etree
@@ -4926,6 +5011,7 @@ class ETreeOnlyTestCase(HelperTestCase):
         result = tostring(a, encoding='unicode', pretty_print=True)
         self.assertEqual(result, "<a>\n  <b/>\n  <c/>\n</a>\n")
 
+    @unittest.skipIf(IS_PYPY, "currently crashes PyPy")
     def test_pypy_proxy_collect(self):
         root = etree.Element('parent')
         etree.SubElement(root, 'child')
@@ -5060,6 +5146,8 @@ class ETreeOnlyTestCase(HelperTestCase):
 
 
 class _XIncludeTestCase(HelperTestCase):
+    __test__ = False
+
     def test_xinclude_text(self):
         filename = fileInTestDir('test_broken.xml')
         root = etree.XML('''\
@@ -5164,11 +5252,13 @@ class _XIncludeTestCase(HelperTestCase):
 
 
 class ETreeXIncludeTestCase(_XIncludeTestCase):
+    __test__ = True
     def include(self, tree):
         tree.xinclude()
 
 
 class ElementIncludeTestCase(_XIncludeTestCase):
+    __test__ = True
     from lxml import ElementInclude
 
     def include(self, tree, loader=None, max_depth=None):
@@ -5910,6 +6000,10 @@ def test_suite():
     suite.addTests(
         [make_doctest('resolvers.txt')])
     return suite
+
+
+# Hide test base classes from test discovery.
+del _XIncludeTestCase
 
 
 if __name__ == '__main__':

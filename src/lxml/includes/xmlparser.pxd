@@ -3,7 +3,7 @@ from libc.string cimport const_char
 from lxml.includes.tree cimport (
     xmlDoc, xmlNode, xmlEntity, xmlDict, xmlDtd, xmlChar, const_xmlChar)
 from lxml.includes.tree cimport xmlInputReadCallback, xmlInputCloseCallback
-from lxml.includes.xmlerror cimport xmlError, xmlStructuredErrorFunc, xmlErrorLevel
+from lxml.includes.xmlerror cimport xmlError, xmlStructuredErrorFunc, xmlErrorLevel, xmlParserErrors
 
 
 cdef extern from "libxml/parser.h" nogil:
@@ -137,10 +137,12 @@ cdef extern from "libxml/parser.h" nogil:
 
     cdef bint xmlHasFeature(xmlFeature feature)
 
+    # START: Legacy, moved to tree.pxd
     cdef xmlDict* xmlDictCreate()
     cdef xmlDict* xmlDictCreateSub(xmlDict* subdict)
     cdef void xmlDictFree(xmlDict* sub)
     cdef int xmlDictReference(xmlDict* dict)
+    # END: Legacy, moved to tree.pxd
 
     cdef int XML_COMPLETE_ATTRS  # SAX option for adding DTD default attributes
     cdef int XML_SKIP_IDS        # SAX option for not building an XML ID dict
@@ -299,6 +301,23 @@ cdef extern from "libxml/parser.h" nogil:
     cdef xmlDtd* xmlIOParseDTD(xmlSAXHandler* sax,
                                xmlParserInputBuffer* input,
                                int enc)
+
+
+cdef extern from *:
+    """
+    #if LIBXML_VERSION < 21400
+    typedef xmlParserErrors (* xmlResourceLoader) (
+        void *ctxt, const char *url, const char *publicId, int type, int flags, xmlParserInput **out);
+    #define xmlCtxtSetResourceLoader(ctxt, loader, data)   ((void) ((void) ctxt, (void) loader, (void) data))
+    #endif
+    """
+
+    ctypedef xmlParserErrors (*xmlResourceLoader)(
+        void *context, const char *url, const char *publicId,
+        int type, int flags,  # actually "xmlResourceType type, xmlParserInputFlags flags"
+        xmlParserInput **out)
+
+    cdef void xmlCtxtSetResourceLoader(xmlParserCtxt *c_ctxt, xmlResourceLoader c_loader, void* context)
 
 
 cdef extern from "libxml/parserInternals.h" nogil:

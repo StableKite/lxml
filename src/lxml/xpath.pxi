@@ -103,31 +103,29 @@ cdef void _registerExsltFunctionsForNamespaces(
     c_href = <const_xmlChar*> _c_href
     ctxt = <xpath.xmlXPathContext*> _ctxt
 
-    if tree.xmlStrcmp(c_href, xslt.EXSLT_DATE_NAMESPACE) == 0:
+    if tree.xmlStrEqual(c_href, xslt.EXSLT_DATE_NAMESPACE):
         xslt.exsltDateXpathCtxtRegister(ctxt, c_prefix)
-    elif tree.xmlStrcmp(c_href, xslt.EXSLT_SETS_NAMESPACE) == 0:
+    elif tree.xmlStrEqual(c_href, xslt.EXSLT_SETS_NAMESPACE):
         xslt.exsltSetsXpathCtxtRegister(ctxt, c_prefix)
-    elif tree.xmlStrcmp(c_href, xslt.EXSLT_MATH_NAMESPACE) == 0:
+    elif tree.xmlStrEqual(c_href, xslt.EXSLT_MATH_NAMESPACE):
         xslt.exsltMathXpathCtxtRegister(ctxt, c_prefix)
-    elif tree.xmlStrcmp(c_href, xslt.EXSLT_STRINGS_NAMESPACE) == 0:
+    elif tree.xmlStrEqual(c_href, xslt.EXSLT_STRINGS_NAMESPACE):
         xslt.exsltStrXpathCtxtRegister(ctxt, c_prefix)
 
 
 cdef class _XPathEvaluatorBase:
     cdef xpath.xmlXPathContext* _xpathCtxt
     cdef _XPathContext _context
-    cdef python.PyThread_type_lock _eval_lock
+    cdef cython.pymutex _eval_lock
     cdef _ErrorLog _error_log
+
     def __cinit__(self):
-        self._xpathCtxt = NULL
-        if config.ENABLE_THREADING:
-            self._eval_lock = python.PyThread_allocate_lock()
-            if self._eval_lock is NULL:
-                raise MemoryError()
         self._error_log = _ErrorLog()
 
     def __init__(self, namespaces, extensions, enable_regexp,
                  smart_strings):
+        if self._context is not None:
+            raise RuntimeError("Repeated call to _XPathEvaluatorBase.__init__()")
         self._context = _XPathContext(namespaces, extensions, self._error_log,
                                       enable_regexp, None, smart_strings)
 
@@ -139,9 +137,6 @@ cdef class _XPathEvaluatorBase:
     def __dealloc__(self):
         if self._xpathCtxt is not NULL:
             xpath.xmlXPathFreeContext(self._xpathCtxt)
-        if config.ENABLE_THREADING:
-            if self._eval_lock is not NULL:
-                python.PyThread_free_lock(self._eval_lock)
 
     cdef set_context(self, xpath.xmlXPathContext* xpathCtxt):
         self._xpathCtxt = xpathCtxt
@@ -158,20 +153,14 @@ cdef class _XPathEvaluatorBase:
         return c == c'/'
 
     @cython.final
-    cdef int _lock(self) except -1:
-        cdef int result
-        if config.ENABLE_THREADING and self._eval_lock != NULL:
-            with nogil:
-                result = python.PyThread_acquire_lock(
-                    self._eval_lock, python.WAIT_LOCK)
-            if result == 0:
-                raise XPathError, "XPath evaluator locking failed"
-        return 0
+    cdef void _lock(self) noexcept:
+        if config.ENABLE_THREADING:
+            self._eval_lock.acquire()
 
     @cython.final
     cdef void _unlock(self) noexcept:
-        if config.ENABLE_THREADING and self._eval_lock != NULL:
-            python.PyThread_release_lock(self._eval_lock)
+        if config.ENABLE_THREADING:
+            self._eval_lock.release()
 
     cdef _build_parse_error(self):
         cdef _BaseErrorLog entries
@@ -232,8 +221,12 @@ cdef class XPathElementEvaluator(_XPathEvaluatorBase):
     you pass ``smart_strings=False``.
     """
     cdef _Element _element
+
     def __init__(self, _Element element not None, *, namespaces=None,
                  extensions=None, regexp=True, smart_strings=True):
+        if self._xpathCtxt is not NULL:
+            raise RuntimeError("Repeated call to XPathElementEvaluator.__init__()")
+
         cdef xpath.xmlXPathContext* xpathCtxt
         cdef int ns_register_status
         cdef _Document doc
@@ -278,16 +271,33 @@ cdef class XPathElementEvaluator(_XPathEvaluatorBase):
         path = _utf8(_path)
         doc = self._element._doc
 
+        # FIXME: as long as we cannot upgrade a read lock to a write lock,
+        # we assume that we need a write lock if the user provided extensions.
+        # Must do this after context.register_context() !
+        use_write_lock = self._context.has_user_extensions
+
         self._lock()
         self._xpathCtxt.node = self._element._c_node
         try:
             self._context.register_context(doc)
             self._context.registerVariables(_variables)
-            c_path = _xcstr(path)
-            with nogil:
-                xpathObj = xpath.xmlXPathEvalExpression(
-                    c_path, self._xpathCtxt)
-            result = self._handle_result(xpathObj, doc)
+
+            if use_write_lock:
+                doc.lock_write()
+            else:
+                doc.lock_read()
+
+            try:
+                c_path = _xcstr(path)
+                with nogil:
+                    xpathObj = xpath.xmlXPathEvalExpression(
+                        c_path, self._xpathCtxt)
+                result = self._handle_result(xpathObj, doc)
+            finally:
+                if use_write_lock:
+                    doc.unlock_write()
+                else:
+                    doc.unlock_read()
         finally:
             self._context.unregister_context()
             self._unlock()
@@ -308,7 +318,7 @@ cdef class XPathDocumentEvaluator(XPathElementEvaluator):
     def __init__(self, _ElementTree etree not None, *, namespaces=None,
                  extensions=None, regexp=True, smart_strings=True):
         XPathElementEvaluator.__init__(
-            self, etree._context_node, namespaces=namespaces, 
+            self, etree._context_node, namespaces=namespaces,
             extensions=extensions, regexp=regexp,
             smart_strings=smart_strings)
 
@@ -330,18 +340,37 @@ cdef class XPathDocumentEvaluator(XPathElementEvaluator):
         self._lock()
         try:
             self._context.register_context(doc)
-            c_doc = _fakeRootDoc(doc._c_doc, self._element._c_node)
+
+            # FIXME: as long as we cannot upgrade a read lock to a write lock,
+            # we assume that we need a write lock if the user provided extensions.
+            # Must do this after context.register_context() !
+            use_write_lock = self._context.has_user_extensions
+
+            if use_write_lock:
+                doc.lock_write()
+            else:
+                doc.lock_fakedoc()
+
             try:
-                self._context.registerVariables(_variables)
-                c_path = _xcstr(path)
-                with nogil:
-                    self._xpathCtxt.doc  = c_doc
-                    self._xpathCtxt.node = tree.xmlDocGetRootElement(c_doc)
-                    xpathObj = xpath.xmlXPathEvalExpression(
-                        c_path, self._xpathCtxt)
-                result = self._handle_result(xpathObj, doc)
+                c_doc = _fakeRootDoc(doc._c_doc, self._element._c_node)
+                try:
+                    self._context.registerVariables(_variables)
+                    c_path = _xcstr(path)
+                    with nogil:
+                        self._xpathCtxt.doc  = c_doc
+                        self._xpathCtxt.node = tree.xmlDocGetRootElement(c_doc)
+                        xpathObj = xpath.xmlXPathEvalExpression(
+                            c_path, self._xpathCtxt)
+                    result = self._handle_result(xpathObj, doc)
+                finally:
+                    _destroyFakeDoc(doc._c_doc, c_doc)
+
             finally:
-                _destroyFakeDoc(doc._c_doc, c_doc)
+                if use_write_lock:
+                    doc.unlock_write()
+                else:
+                    doc.unlock_fakedoc()
+
                 self._context.unregister_context()
         finally:
             self._unlock()
@@ -388,11 +417,12 @@ cdef class XPath(_XPathEvaluatorBase):
     """
     cdef xpath.xmlXPathCompExpr* _xpath
     cdef bytes _path
-    def __cinit__(self):
-        self._xpath = NULL
 
     def __init__(self, path, *, namespaces=None, extensions=None,
                  regexp=True, smart_strings=True):
+        if self._xpath is not NULL:
+            return
+
         cdef xpath.xmlXPathContext* xpathCtxt
         _XPathEvaluatorBase.__init__(self, namespaces, extensions,
                                      regexp, smart_strings)
@@ -408,27 +438,44 @@ cdef class XPath(_XPathEvaluatorBase):
     def __call__(self, _etree_or_element, **_variables):
         "__call__(self, _etree_or_element, **_variables)"
         cdef xpath.xmlXPathObject*  xpathObj
-        cdef _Document document
-        cdef _Element element
 
         assert self._xpathCtxt is not NULL, "XPath context not initialised"
-        document = _documentOrRaise(_etree_or_element)
+        doc = _documentOrRaise(_etree_or_element)
         element  = _rootNodeOrRaise(_etree_or_element)
 
         self._lock()
-        self._xpathCtxt.doc  = document._c_doc
-        self._xpathCtxt.node = element._c_node
-
         try:
-            self._context.register_context(document)
+            self._xpathCtxt.doc  = doc._c_doc
+            self._xpathCtxt.node = element._c_node
+
+            self._context.register_context(doc)
             self._context.registerVariables(_variables)
-            with nogil:
-                xpathObj = xpath.xmlXPathCompiledEval(
-                    self._xpath, self._xpathCtxt)
-            result = self._handle_result(xpathObj, document)
+
+            # FIXME: as long as we cannot upgrade a read lock to a write lock,
+            # we assume that we need a write lock if the user provided extensions.
+            # Must do this after context.register_context() !
+            use_write_lock = self._context.has_user_extensions
+
+            if use_write_lock:
+                doc.lock_write()
+            else:
+                doc.lock_read()
+
+            try:
+                with nogil:
+                    xpathObj = xpath.xmlXPathCompiledEval(
+                        self._xpath, self._xpathCtxt)
+                result = self._handle_result(xpathObj, doc)
+            finally:
+                if use_write_lock:
+                    doc.unlock_write()
+                else:
+                    doc.unlock_read()
+
         finally:
             self._context.unregister_context()
             self._unlock()
+
         return result
 
     @property

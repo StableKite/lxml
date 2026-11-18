@@ -30,19 +30,19 @@ cdef public api _Element elementFactory(_Document doc, xmlNode* c_node):
 
 cdef public api _Element makeElement(tag, _Document doc, parser,
                                      text, tail, attrib, nsmap):
-    return _makeElement(tag, NULL, doc, parser, text, tail, attrib, nsmap, None)
+    return _makeElement(tag, NULL, doc, parser, text, tail, attrib, nsmap)
 
 cdef public api _Element makeSubElement(_Element parent, tag, text, tail,
                                         attrib, nsmap):
     _assertValidNode(parent)
-    return _makeSubElement(parent, tag, text, tail, attrib, nsmap, None)
+    return _makeSubElement(parent, tag, text, tail, attrib, nsmap)
 
 cdef public api void setElementClassLookupFunction(
     _element_class_lookup_function function, state):
     _setElementClassLookupFunction(function, state)
 
 cdef public api object lookupDefaultElementClass(state, doc, xmlNode* c_node):
-    return _lookupDefaultElementClass(state, doc, c_node)
+    return _lookupDefaultElementClasses(state, doc, c_node)
 
 cdef public api object lookupNamespaceElementClass(state, doc, xmlNode* c_node):
     return _find_nselement_class(state, doc, c_node)
@@ -176,3 +176,24 @@ cdef public api tree.xmlNs* findOrBuildNodeNsPrefix(
     if doc is None:
         raise TypeError
     return doc._findOrBuildNodeNs(c_node, href, prefix, 0)
+
+
+# Document locking
+
+cdef public api void lock_read(_Document doc) noexcept:
+    doc.lock_read()
+
+cdef public api void unlock_read(_Document doc) noexcept:
+    doc.unlock_read()
+
+cdef public api void lock_write(_Document doc) noexcept:
+    doc.lock_write()
+
+cdef public api void unlock_write(_Document doc) noexcept:
+    doc.unlock_write()
+
+cdef public api void lock_write2(_Document doc1, _Document doc2) noexcept:
+    doc1.lock_write_with(doc2)
+
+cdef public api void unlock_write2(_Document doc1, _Document doc2) noexcept:
+    doc1.unlock_write_with(doc2)

@@ -77,38 +77,56 @@ def download_and_extract_windows_binaries(destdir, arch=None):
 
         return max_release
 
-    latest_release = read_latest_release()
-
-    release_tag = latest_release['tag_name']
-    download_url = f"https://github.com/lxml/libxml2-win-binaries/releases/download/{urlquote(release_tag)}/"
-
-    arch_part = f'.{arch}.'
-    asset_files = {
-        asset['name']: (asset['size'], asset['digest'])
-        for asset in latest_release.get('assets', ())
-        if arch_part in asset['name']
-    }
-
-    lib_file_names = list(asset_files)
-    libs = {
-        libname: build_libzip_name(libname, find_max_version(libname, lib_file_names))
-        for libname in ['libxml2', 'libxslt', 'zlib', 'iconv']
-    }
+    def find_local_lib(libname, version):
+        if not version:
+            return None
+        libfn = build_libzip_name(libname, version)
+        destfile = os.path.join(destdir, libfn)
+        return libfn if os.path.exists(destfile) else None
 
     if not os.path.exists(destdir):
         os.makedirs(destdir)
 
-    for libfn in libs.values():
-        srcfile = urljoin(download_url, libfn)
-        destfile = os.path.join(destdir, libfn)
-        if os.path.exists(destfile):
-            file_size, file_digest = asset_files.get(libfn, (None, None))
-            if file_size and os.path.getsize(destfile) == file_size and read_file_digest(destfile) == file_digest:
+    libs = {}
+    for libname in ['libxml2', 'libxslt', 'zlib', 'iconv']:
+        version = os.environ.get('LIBICONV_VERSION' if libname == 'iconv' else f"{libname.upper()}_VERSION")
+        libfn = find_local_lib(libname, version)
+        if libfn:
+            print(f'Using local copy of  "{libfn}"')
+        libs[libname] = libfn
+
+    if None in libs.values():
+        # Need to gather version and download URL from winlibs release.
+        latest_release = read_latest_release()
+        arch_part = f'.{arch}.'
+        asset_files = {
+            asset['name']: (asset['size'], asset['digest'])
+            for asset in latest_release.get('assets', ())
+            if arch_part in asset['name']
+        }
+        release_tag = latest_release['tag_name']
+        download_url = f"https://github.com/lxml/libxml2-win-binaries/releases/download/{urlquote(release_tag)}/"
+
+        lib_file_names = list(asset_files)
+        for libname, libfn in libs.items():
+            if libfn:
+                continue
+            version = find_max_version(libname, lib_file_names)
+            libfn = find_local_lib(libname, version)
+            if libfn:
+                libs[libname] = libfn
+                srcfile = urljoin(download_url, libfn)
                 print(f'Using local copy of  "{srcfile}"')
                 continue
 
-        print(f'Retrieving "{srcfile}" to "{destfile}"')
-        urlretrieve(srcfile, destfile)
+            # Need to download lib.
+            libfn = build_libzip_name(libname, version)
+            srcfile = urljoin(download_url, libfn)
+            destfile = os.path.join(destdir, libfn)
+
+            print(f'Retrieving "{srcfile}" to "{destfile}"')
+            urlretrieve(srcfile, destfile)
+            libs[libname] = libfn
 
     lib_dirs = {
         libname: unpack_zipfile(os.path.join(destdir, libfn), destdir)

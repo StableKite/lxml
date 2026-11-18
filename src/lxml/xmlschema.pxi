@@ -2,15 +2,15 @@
 from lxml.includes cimport xmlschema
 
 
-cdef class XMLSchemaError(LxmlError):
+class XMLSchemaError(LxmlError):
     """Base class of all XML Schema errors
     """
 
-cdef class XMLSchemaParseError(XMLSchemaError):
+class XMLSchemaParseError(XMLSchemaError):
     """Error while parsing an XML document as XML Schema.
     """
 
-cdef class XMLSchemaValidateError(XMLSchemaError):
+class XMLSchemaValidateError(XMLSchemaError):
     """Error while validating an XML document with an XML Schema.
     """
 
@@ -43,6 +43,9 @@ cdef class XMLSchema(_Validator):
         self._add_attribute_defaults = False
 
     def __init__(self, etree=None, *, file=None, bint attribute_defaults=False):
+        if self._c_schema is not NULL:
+            raise RuntimeError("Repeated call to XMLSchema.__init__()")
+
         cdef xmlschema.xmlSchemaParserCtxt* parser_ctxt
         cdef xmlDoc* c_doc
 
@@ -52,7 +55,11 @@ cdef class XMLSchema(_Validator):
         if etree is not None:
             doc = _documentOrRaise(etree)
             root_node = _rootNodeOrRaise(etree)
-            c_doc = _copyDocRoot(doc._c_doc, root_node._c_node)
+            doc.lock_read()
+            try:
+                c_doc = _copyDocRoot(doc._c_doc, root_node._c_node)
+            finally:
+                doc.unlock_read()
             self._doc = _documentFactory(c_doc, doc._parser)
             parser_ctxt = xmlschema.xmlSchemaNewDocParserCtxt(c_doc)
         elif file is not None:
@@ -72,19 +79,25 @@ cdef class XMLSchema(_Validator):
         # Need a cast here because older libxml2 releases do not use 'const' in the functype.
         xmlschema.xmlSchemaSetParserStructuredErrors(
             parser_ctxt, <xmlerror.xmlStructuredErrorFunc> _receiveError, <void*>self._error_log)
-        if self._doc is not None:
-            # calling xmlSchemaParse on a schema with imports or
-            # includes will cause libxml2 to create an internal
-            # context for parsing, so push an implied context to route
-            # resolve requests to the document's parser
-            __GLOBAL_PARSER_CONTEXT.pushImpliedContextFromParser(self._doc._parser)
-        with nogil:
-            orig_loader = _register_document_loader()
-            self._c_schema = xmlschema.xmlSchemaParse(parser_ctxt)
-            _reset_document_loader(orig_loader)
-        if self._doc is not None:
-            __GLOBAL_PARSER_CONTEXT.popImpliedContext()
-        xmlschema.xmlSchemaFreeParserCtxt(parser_ctxt)
+
+        try:
+            if self._doc is not None:
+                # calling xmlSchemaParse on a schema with imports or
+                # includes will cause libxml2 to create an internal
+                # context for parsing, so push an implied context to route
+                # resolve requests to the document's parser
+                __GLOBAL_PARSER_CONTEXT.pushImpliedContextFromParser(self._doc._parser)
+
+            with nogil:
+                old_resource_loader = _register_xmlschema_resource_loader(parser_ctxt)
+                self._c_schema = xmlschema.xmlSchemaParse(parser_ctxt)
+                _reset_resource_loader(old_resource_loader)
+
+            if self._doc is not None:
+                __GLOBAL_PARSER_CONTEXT.popImpliedContext()
+
+        finally:
+            xmlschema.xmlSchemaFreeParserCtxt(parser_ctxt)
 
         if self._c_schema is NULL:
             raise XMLSchemaParseError(
@@ -120,6 +133,7 @@ cdef class XMLSchema(_Validator):
         if valid_ctxt is NULL:
             raise MemoryError()
 
+        doc.lock_fakedoc()
         try:
             if self._add_attribute_defaults:
                 xmlschema.xmlSchemaSetValidOptions(
@@ -135,6 +149,7 @@ cdef class XMLSchema(_Validator):
                 ret = xmlschema.xmlSchemaValidateDoc(valid_ctxt, c_doc)
             _destroyFakeDoc(doc._c_doc, c_doc)
         finally:
+            doc.unlock_fakedoc()
             xmlschema.xmlSchemaFreeValidCtxt(valid_ctxt)
 
         if ret == -1:
@@ -154,6 +169,15 @@ cdef class XMLSchema(_Validator):
         context._add_default_attributes = (self._has_default_attributes and (
             add_default_attributes or self._add_attribute_defaults))
         return context
+
+
+cdef xmlparser.xmlExternalEntityLoader _register_xmlschema_resource_loader(xmlschema.xmlSchemaParserCtxt *schema_ctxt) noexcept nogil:
+    if tree.LIBXML_VERSION < 21400:
+        return _register_resource_loader()
+    # libxml2 2.14 has per-context document loaders.
+    xmlschema.xmlSchemaSetResourceLoader(schema_ctxt, <xmlparser.xmlResourceLoader> _local_resource_loader, NULL)
+    return NULL
+
 
 @cython.final
 @cython.internal

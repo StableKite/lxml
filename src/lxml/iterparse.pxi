@@ -7,7 +7,7 @@ cdef class iterparse:
                   compact=True, resolve_entities='internal', remove_comments=False, \
                   remove_pis=False, strip_cdata=True, encoding=None, \
                   html=False, recover=None, huge_tree=False, schema=None, \
-                  chunk_size=32768)
+                  chunk_size=65536)
 
     Incremental parser.
 
@@ -34,30 +34,35 @@ cdef class iterparse:
     libxml2 parser configuration.  A DTD will also be loaded if validation or
     attribute default values are requested.
 
-    Available boolean keyword arguments:
-     - attribute_defaults: read default attributes from DTD
-     - dtd_validation: validate (if DTD is available)
-     - load_dtd: use DTD for parsing
-     - no_network: prevent network access for related files
-     - remove_blank_text: discard blank text nodes
-     - remove_comments: discard comments
-     - remove_pis: discard processing instructions
-     - strip_cdata: replace CDATA sections by normal text content (default:
-       True for XML, ignored otherwise)
-     - compact: safe memory for short text content (default: True)
-     - resolve_entities: replace entities by their text value
-       (default: 'internal' only; True before lxml 6.1)
-     - huge_tree: disable security restrictions and support very deep trees
-                  and very long text content (only affects libxml2 2.7+)
-     - html: parse input as HTML (default: XML)
-     - recover: try hard to parse through broken input (default: True for HTML,
-                False otherwise)
+    **Available boolean keyword arguments:**
 
-    Other keyword arguments:
-     - encoding: override the document encoding
-     - schema: an XMLSchema to validate against
-     - chunk_size: the number of bytes to read from the 'source' in one chunk
-                   (default: 32768)
+    - attribute_defaults: read default attributes from DTD
+    - dtd_validation: validate (if DTD is available)
+    - load_dtd: use DTD for parsing
+    - no_network: prevent network access for related files
+    - remove_blank_text: discard blank text nodes.  In XML mode, without
+      DTD/schema, a heuristic preserves blank text nodes appearing after
+      non-blank content at the same level.  In HTML mode, removal follows
+      built-in structural rules and does not necessarily require DTD/schema.
+    - remove_comments: discard comments
+    - remove_pis: discard processing instructions
+    - strip_cdata: replace CDATA sections by normal text content (default:
+      True for XML, ignored otherwise)
+    - compact: safe memory for short text content (default: True)
+    - resolve_entities: replace entities by their text value
+      (default: 'internal' only; True before lxml 6.1)
+    - huge_tree: disable security restrictions and support very deep trees
+      and very long text content
+    - html: parse input as HTML (default: XML)
+    - recover: try hard to parse through broken input (default: True for
+      HTML, False otherwise)
+
+    **Other keyword arguments:**
+
+    - encoding: override the document encoding
+    - schema: an XMLSchema to validate against
+    - chunk_size: the number of bytes to read from the 'source' in one chunk
+      (default: 65536)
     """
     cdef _FeedParser _parser
     cdef object _tag
@@ -75,7 +80,7 @@ cdef class iterparse:
                  compact=True, resolve_entities='internal', remove_comments=False,
                  remove_pis=False, strip_cdata=True, encoding=None,
                  html=False, recover=None, huge_tree=False, collect_ids=True,
-                 XMLSchema schema=None, int chunk_size=32768):
+                 XMLSchema schema=None, int chunk_size=65536):
         if not hasattr(source, 'read'):
             source = _getFSPathOrObject(source)
             self._filename = source
@@ -279,20 +284,26 @@ cdef class iterwalk:
 
         if self._event_filter:
             self._index = 0
-            if self._matcher is not None and self._event_filter & PARSE_EVENT_FILTER_START:
-                self._matcher.cacheTags(root._doc)
+            doc = root._doc
+            doc.lock_read()
+            try:
+                if self._matcher is not None and self._event_filter & PARSE_EVENT_FILTER_START:
+                    self._matcher.cacheTags(root._doc)
 
-            # When processing an ElementTree, add events for the preceding comments/PIs.
-            if self._event_filter & (PARSE_EVENT_FILTER_COMMENT | PARSE_EVENT_FILTER_PI):
-                if isinstance(element_or_tree, _ElementTree):
-                    self._include_siblings = root
-                    for elem in list(root.itersiblings(preceding=True))[::-1]:
-                        if self._event_filter & PARSE_EVENT_FILTER_COMMENT and elem.tag is Comment:
-                            self._events.append(('comment', elem))
-                        elif self._event_filter & PARSE_EVENT_FILTER_PI and elem.tag is PI:
-                            self._events.append(('pi', elem))
+                # When processing an ElementTree, add events for the preceding comments/PIs.
+                if self._event_filter & (PARSE_EVENT_FILTER_COMMENT | PARSE_EVENT_FILTER_PI):
+                    if isinstance(element_or_tree, _ElementTree):
+                        self._include_siblings = root
+                        for elem in list(root.itersiblings(preceding=True))[::-1]:
+                            if self._event_filter & PARSE_EVENT_FILTER_COMMENT and elem.tag is Comment:
+                                self._events.append(('comment', elem))
+                            elif self._event_filter & PARSE_EVENT_FILTER_PI and elem.tag is PI:
+                                self._events.append(('pi', elem))
 
-            ns_count = self._start_node(root)
+                ns_count = self._start_node(root)
+            finally:
+                doc.unlock_read()
+
             self._node_stack.append( (root, ns_count) )
         else:
             self._index = -1
@@ -302,52 +313,68 @@ cdef class iterwalk:
 
     def __next__(self):
         cdef xmlNode* c_child
+        cdef _Document doc
         cdef _Element node
         cdef _Element next_node
         cdef int ns_count = 0
         if self._events:
             return self._next_event()
-        if self._matcher is not None and self._index >= 0:
-            node = self._node_stack[self._index][0]
-            self._matcher.cacheTags(node._doc)
 
-        # find next node
-        while self._index >= 0:
-            node = self._node_stack[self._index][0]
+        doc = None
+        try:
+            if self._matcher is not None and self._index >= 0:
+                node = self._node_stack[self._index][0]
+                doc = node._doc
+                doc.lock_read()
+                self._matcher.cacheTags(doc)
 
-            if self._skip_state == IWSKIP_SKIP_NEXT:
-                c_child = NULL
-            else:
-                c_child = self._process_non_elements(
-                    node._doc, _findChildForwards(node._c_node, 0))
-            self._skip_state = IWSKIP_CANNOT_SKIP
+            # find next node
+            while self._index >= 0:
+                node = self._node_stack[self._index][0]
+                if doc is not node._doc:
+                    # Normally, we should traverse only one doc. But if users move elements to other documents
+                    # while we're still traversing them, we should handle a document switch as well.
+                    if doc is not None:
+                        doc.unlock_read()
+                    doc = node._doc
+                    doc.lock_read()
 
-            while c_child is NULL:
-                # back off through parents
-                self._index -= 1
-                node = self._end_node()
-                if self._index < 0:
-                    break
-                c_child = self._process_non_elements(
-                    node._doc, _nextElement(node._c_node))
+                if self._skip_state == IWSKIP_SKIP_NEXT:
+                    c_child = NULL
+                else:
+                    c_child = self._process_non_elements(
+                        node._doc, _findChildForwards(node._c_node, 0))
+                self._skip_state = IWSKIP_CANNOT_SKIP
 
-            if c_child is not NULL:
-                next_node = _elementFactory(node._doc, c_child)
-                if self._event_filter & (PARSE_EVENT_FILTER_START |
-                                         PARSE_EVENT_FILTER_START_NS):
-                    ns_count = self._start_node(next_node)
-                elif self._event_filter & PARSE_EVENT_FILTER_END_NS:
-                    ns_count = _countNsDefs(next_node._c_node)
-                self._node_stack.append( (next_node, ns_count) )
-                self._index += 1
-            if self._events:
-                return self._next_event()
+                while c_child is NULL:
+                    # back off through parents
+                    self._index -= 1
+                    node = self._end_node()
+                    if self._index < 0:
+                        break
+                    c_child = self._process_non_elements(
+                        node._doc, _nextElement(node._c_node))
 
-        if self._include_siblings is not None:
-            node, self._include_siblings = self._include_siblings, None
-            self._process_non_elements(node._doc, _nextElement(node._c_node))
-            if self._events:
-                return self._next_event()
+                if c_child is not NULL:
+                    next_node = _elementFactory(node._doc, c_child)
+                    if self._event_filter & (PARSE_EVENT_FILTER_START |
+                                            PARSE_EVENT_FILTER_START_NS):
+                        ns_count = self._start_node(next_node)
+                    elif self._event_filter & PARSE_EVENT_FILTER_END_NS:
+                        ns_count = _countNsDefs(next_node._c_node)
+                    self._node_stack.append( (next_node, ns_count) )
+                    self._index += 1
+                if self._events:
+                    return self._next_event()
+
+            if self._include_siblings is not None:
+                node, self._include_siblings = self._include_siblings, None
+                self._process_non_elements(node._doc, _nextElement(node._c_node))
+                if self._events:
+                    return self._next_event()
+        finally:
+            if doc is not None:
+                doc.unlock_read()
 
         raise StopIteration
 

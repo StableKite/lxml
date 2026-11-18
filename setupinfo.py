@@ -15,18 +15,18 @@ try:
 except ImportError:
     CYTHON_INSTALLED = False
 
-EXT_MODULES = ["lxml.etree", "lxml.objectify"]
+EXT_MODULES = ["lxml.etree", "lxml.objectify", "lxml.tests._testlock"]
 COMPILED_MODULES = [
     "lxml.builder",
-    "lxml._elementpath",
     "lxml.html.diff",
     "lxml.html._difflib",
     "lxml.sax",
 ]
 HEADER_FILES = ['etree.h', 'etree_api.h']
 
-if hasattr(sys, 'pypy_version_info') or (
-        getattr(sys, 'implementation', None) and sys.implementation.name != 'cpython'):
+IS_PYPY = hasattr(sys, 'pypy_version_info')
+
+if IS_PYPY or (getattr(sys, 'implementation', None) and sys.implementation.name != 'cpython'):
     # disable Cython compilation of Python modules in PyPy and other non-CPythons
     del COMPILED_MODULES[:]
 
@@ -126,6 +126,10 @@ def ext_modules(static_include_dirs, static_library_dirs,
     _define_macros = define_macros()
     _libraries = libraries()
 
+    limited_api = {}
+    if OPTION_LIMITED_API:
+        limited_api['py_limited_api'] = True
+
     if _library_dirs:
         message = "Building against libxml2/libxslt in "
         if len(_library_dirs) > 1:
@@ -148,6 +152,8 @@ def ext_modules(static_include_dirs, static_library_dirs,
     cythonize_directives = {
         'binding': True,
     }
+    if sys.version_info >= (3,14):
+        cythonize_directives['freethreading_compatible'] = True
     if OPTION_WITH_COVERAGE:
         cythonize_directives['linetrace'] = True
 
@@ -169,6 +175,7 @@ def ext_modules(static_include_dirs, static_library_dirs,
                 library_dirs = None if is_py else _library_dirs,
                 runtime_library_dirs = None if is_py else runtime_library_dirs,
                 libraries = None if is_py else _libraries,
+                **limited_api,
             ))
     if CYTHON_INSTALLED and OPTION_WITH_CYTHON_GDB:
         for ext in result:
@@ -316,6 +323,8 @@ def cflags(static_cflags):
         result.append('-w')
     if OPTION_DEBUG_GCC:
         result.append('-g2')
+    if OPTION_CSTD:
+        result.append(f'/std:{OPTION_CSTD}' if sys.platform == 'win32' else f'-std={OPTION_CSTD}')
 
     if OPTION_STATIC:
         if not static_cflags:
@@ -336,6 +345,15 @@ def define_macros():
         macros.append(('PYREX_WITHOUT_ASSERTIONS', None))
     if OPTION_WITHOUT_THREADING:
         macros.append(('WITHOUT_THREADING', None))
+    if OPTION_LIMITED_API:
+        if OPTION_LIMITED_API.count('.') != 1:
+            raise RuntimeError(
+                f"Invalid format for '--lxml-limited-api' option, "
+                f"expected Python version like '3.12', got {OPTION_LIMITED_API!r}")
+        pymajor, pyminor = OPTION_LIMITED_API.split('.')
+        macros.append(('Py_LIMITED_API', f"0x{int(pymajor):02x}{int(pyminor):02x}0000"))
+        # Note: this makes the '_Document' type ABI incompatible in abi3 wheels!
+        macros.append(('CYTHON_UNSAFE_IGNORE_PYMUTEX_ABI_COMPATIBILITY', '1'))
     if OPTION_WITH_REFNANNY:
         macros.append(('CYTHON_REFNANNY', None))
     if OPTION_WITH_UNICODE_STRINGS:
@@ -343,7 +361,7 @@ def define_macros():
     if OPTION_WITH_COVERAGE:
         macros.append(('CYTHON_TRACE_NOGIL', '1'))
         # coverage.py does not support Cython together with sys.monitoring.
-        # See https://github.com/nedbat/coveragepy/issues/1790
+        # See https://github.com/coveragepy/coveragepy/issues/1790
         macros.append(('CYTHON_USE_SYS_MONITORING', '0'))
     if OPTION_BUILD_LIBXML2XSLT:
         macros.append(('LIBXML_STATIC', None))
@@ -351,6 +369,11 @@ def define_macros():
         macros.append(('LIBEXSLT_STATIC', None))
     # Disable showing C lines in tracebacks, unless explicitly requested.
     macros.append(('CYTHON_CLINE_IN_TRACEBACK', '1' if OPTION_WITH_CLINES else '0'))
+    # Use compact type specs to reduce the declaration size of our many extension types.
+    macros.append(('CYTHON_USE_TYPE_SPECS', '1'))
+    # PyPy crashes when accessing objects in tp_finalize().
+    #if IS_PYPY:
+    #    macros.append(('CYTHON_USE_TP_FINALIZE', '0'))
     return macros
 
 
@@ -544,6 +567,10 @@ OPTION_WITH_ZLIB = not has_option('without-zlib')
 if OPTION_WITHOUT_CYTHON:
     CYTHON_INSTALLED = False
 OPTION_STATIC = staticbuild or has_option('static')
+OPTION_LIMITED_API = option_value('lxml-limited-api')
+if OPTION_LIMITED_API == 'true':
+    # default Limited API target version
+    OPTION_LIMITED_API = '3.11' if sys.version_info < (3,12) else '3.12'
 OPTION_DEBUG_GCC = has_option('debug-gcc')
 OPTION_SHOW_WARNINGS = has_option('warnings')
 OPTION_AUTO_RPATH = has_option('auto-rpath')
@@ -557,6 +584,7 @@ OPTION_LIBXSLT_VERSION = option_value('libxslt-version')
 OPTION_LIBICONV_VERSION = option_value('libiconv-version')
 OPTION_ZLIB_VERSION = option_value('zlib-version')
 OPTION_MULTICORE = option_value('multicore')
+OPTION_CSTD = option_value('lxml-cstd')
 OPTION_DOWNLOAD_DIR = option_value('download-dir')
 if OPTION_DOWNLOAD_DIR is None:
     OPTION_DOWNLOAD_DIR = 'libs'
