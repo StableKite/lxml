@@ -64,7 +64,8 @@ install3-python%:
 	mkdir -p debian/python3-lxml/usr/bin
 	mkdir -p debian/python3-lxml/$(call py_libdir, $*)
 	python$* setup.py install \
-		--root=$(CURDIR)/debian/python3-lxml --install-layout=deb
+		--root=$(CURDIR)/debian/python3-lxml --prefix=/usr \
+		--install-lib=$(call py_libdir, $*)
 
 # Build architecture-independent files here.
 binary-indep: build install
